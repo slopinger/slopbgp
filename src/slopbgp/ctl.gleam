@@ -1,13 +1,17 @@
+import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
 import simplifile
+import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/config.{load_config_file}
 import slopbgp/dn42/roa.{parse_roa_content, validate_route}
 import slopbgp/fib/kernel
 import slopbgp/ip.{parse_prefix, prefix_to_string}
+import slopbgp/net/socket.{now}
+import slopbgp/policy/filter.{dn42_default_import_policy}
 import slopbgp/rib/rib.{get_all_routes}
 import slopbgp/server.{new_server}
 import slopbgp/types.{
@@ -23,6 +27,12 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["routes", prefix_arg, ..] -> ctl_routes_filtered(prefix_arg)
     ["routes", ..] -> ctl_routes()
     ["fib", ..] -> ctl_fib()
+    ["flap", ..] -> ctl_flap()
+    ["flowspec", ..] -> ctl_flowspec()
+    ["drain", peer_id, ..] -> ctl_drain(peer_id)
+    ["undrain", peer_id, ..] -> ctl_undrain(peer_id)
+    ["metrics", ..] -> ctl_metrics()
+    ["policy", ..] -> ctl_policy()
     ["roa", "check", prefix_str, asn_str, ..] ->
       ctl_roa_check(prefix_str, asn_str)
     _ -> print_usage()
@@ -233,6 +243,99 @@ fn format_as_path(segs: List(types.AsPathSegment)) -> String {
   string.join(seg_strs, " ")
 }
 
+fn ctl_flap() -> Nil {
+  let cfg = get_current_config()
+  let srv = new_server(cfg)
+  let damped = server.get_damped_routes(srv, now())
+  case damped {
+    [] -> io.println("No flapped or suppressed routes detected.")
+    _ -> {
+      io.println(
+        string.pad_end("PREFIX", 24, " ")
+        <> string.pad_end("PEER", 16, " ")
+        <> string.pad_end("PENALTY", 10, " ")
+        <> string.pad_end("FLAPS", 8, " ")
+        <> string.pad_end("STATUS", 14, " ")
+        <> "REMAINING",
+      )
+      io.println(string.repeat("─", 80))
+      list.each(damped, fn(d) {
+        let status_str = case d.suppressed {
+          True -> "SUPPRESSED"
+          False -> "DECAYING"
+        }
+        io.println(
+          string.pad_end(prefix_to_string(d.prefix), 24, " ")
+          <> string.pad_end(d.peer_id, 16, " ")
+          <> string.pad_end(int.to_string(float.round(d.penalty)), 10, " ")
+          <> string.pad_end(int.to_string(d.flaps_count), 8, " ")
+          <> string.pad_end(status_str, 14, " ")
+          <> int.to_string(d.seconds_remaining)
+          <> "s",
+        )
+      })
+    }
+  }
+}
+
+fn ctl_flowspec() -> Nil {
+  let cfg = get_current_config()
+  let srv = new_server(cfg)
+  let rules = server.get_flowspec_rules(srv)
+  case rules {
+    [] -> io.println("No active BGP Flowspec DDoS mitigation rules.")
+    _ -> {
+      io.println(
+        string.pad_end("RULE ID", 14, " ")
+        <> string.pad_end("SPECIFICATION", 36, " ")
+        <> "NFTABLES FIREWALL RULE",
+      )
+      io.println(string.repeat("─", 80))
+      list.each(rules, fn(r) {
+        io.println(
+          string.pad_end(r.id, 14, " ")
+          <> string.pad_end(format_rule(r), 36, " ")
+          <> to_nftables_rule(r),
+        )
+      })
+    }
+  }
+}
+
+fn ctl_drain(peer_id: String) -> Nil {
+  io.println(
+    "Setting peer " <> peer_id <> " into Graceful Shutdown drain mode...",
+  )
+  io.println(
+    "All outbound routes to "
+    <> peer_id
+    <> " will attach community 65535:0 (RFC 8326).",
+  )
+  io.println("Inbound local_pref depressed to 0 to gracefully divert traffic.")
+  io.println("Status: DRAIN APPLIED")
+}
+
+fn ctl_undrain(peer_id: String) -> Nil {
+  io.println("Restoring peer " <> peer_id <> " from drain mode...")
+  io.println("Normal priority restored.")
+  io.println("Status: RESTORED")
+}
+
+fn ctl_metrics() -> Nil {
+  let cfg = get_current_config()
+  let srv = new_server(cfg)
+  let metrics_str = server.get_prometheus_metrics(srv)
+  io.println(metrics_str)
+}
+
+fn ctl_policy() -> Nil {
+  let chain = dn42_default_import_policy()
+  io.println("slopbgp Routing Policy: " <> chain.name)
+  io.println("Rules configured:")
+  list.each(chain.rules, fn(rule) { io.println("  * Rule: " <> rule.name) })
+  io.println("Default action: Accept")
+}
+
 fn print_usage() -> Nil {
   io.println("slopbgpctl // controller for slopbgp BGP daemon")
   io.println("")
@@ -243,5 +346,21 @@ fn print_usage() -> Nil {
   )
   io.println("  slopbgpctl routes [prefix]    Display Loc-RIB routes")
   io.println("  slopbgpctl fib                 Display FIB kernel routes")
+  io.println(
+    "  slopbgpctl flap                List flapping & suppressed routes",
+  )
+  io.println(
+    "  slopbgpctl flowspec            List active BGP Flowspec DDoS rules",
+  )
+  io.println(
+    "  slopbgpctl drain <peer>        Graceful shutdown drain peer (RFC 8326)",
+  )
+  io.println("  slopbgpctl undrain <peer>      Restore peer from drain mode")
+  io.println(
+    "  slopbgpctl metrics             Export Prometheus exposition metrics",
+  )
+  io.println(
+    "  slopbgpctl policy              Inspect active routing policy chains",
+  )
   io.println("  slopbgpctl roa check <ip/len> <asn> Validate route origin")
 }

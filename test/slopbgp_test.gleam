@@ -1,12 +1,22 @@
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import gleeunit
 import gleeunit/should
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
 import slopbgp/bgp/capabilities.{decode_capabilities, encode_capability}
+import slopbgp/bgp/damping.{default_damping_config, evaluate_flap, record_flap}
+import slopbgp/bgp/flowspec.{
+  decode_action_community, decode_flowspec_nlri, encode_action_community,
+  encode_flowspec_nlri, format_rule, to_nftables_rule,
+}
 import slopbgp/bgp/fsm.{
   EventAutomaticStart, EventReceivedKeepalive, EventReceivedOpen,
   EventTcpConnected, handle_event, new_session,
+}
+import slopbgp/bgp/graceful_shutdown.{
+  apply_graceful_shutdown_inbound, apply_graceful_shutdown_outbound,
+  graceful_shutdown_community, has_graceful_shutdown,
 }
 import slopbgp/bgp/message.{decode_message, encode_message}
 import slopbgp/dn42/filter.{is_bogon, is_valid_dn42_network}
@@ -15,15 +25,19 @@ import slopbgp/ip.{
   decode_prefixes_ipv4, encode_prefix, ip_to_string, is_prefix_contained,
   parse_ip, parse_prefix, prefix_to_string,
 }
+import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
+import slopbgp/policy/filter as policy_filter
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/simulator.{run_simulation}
 import slopbgp/types.{
-  AfiIpv4, AfiIpv6, AsSequence, AttrAsPath, AttrCommunities,
-  AttrLargeCommunities, AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop,
-  AttrOrigin, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
-  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapMultiProtocol,
-  CapRouteRefresh, Community, Ipv4, Ipv6, LargeCommunity, MsgKeepalive,
-  MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, RoaInvalid, RoaNotFound,
+  type Route, ActionAccept, ActionPrependAs, ActionSetLocalPref, AfiIpv4,
+  AfiIpv6, AsSequence, AttrAsPath, AttrCommunities, AttrLargeCommunities,
+  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop, AttrOrigin, CapAddPath,
+  CapBgpRole, CapEnhancedRouteRefresh, CapExtendedMessage, CapExtendedNextHop,
+  CapFourOctetAsn, CapMultiProtocol, CapRouteRefresh, Community, FlowActionDrop,
+  FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowspecRule, Ipv4, Ipv6,
+  LargeCommunity, MatchAsPathContains, MsgKeepalive, MsgNotification, MsgOpen,
+  MsgRouteRefresh, OriginIgp, PolicyChain, PolicyRule, RoaInvalid, RoaNotFound,
   RoaValid, RoleCustomer, Route, SafiUnicast, StateConnect, StateEstablished,
   StateOpenConfirm, StateOpenSent,
 }
@@ -275,4 +289,209 @@ pub fn rib_decision_process_test() {
 pub fn full_simulation_test() {
   let res = run_simulation()
   res |> should.equal(Ok(Nil))
+}
+
+// 11. RFC 8326 Graceful Shutdown Tests
+pub fn graceful_shutdown_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let clean_route =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_de",
+      timestamp: 1000,
+      path_id: None,
+    )
+
+  has_graceful_shutdown(clean_route) |> should.equal(False)
+
+  // Applying outbound graceful shutdown attaches community 65535:0 and local_pref 0
+  let drained_route = apply_graceful_shutdown_outbound(clean_route)
+  has_graceful_shutdown(drained_route) |> should.equal(True)
+  drained_route.local_pref |> should.equal(0)
+  list.contains(drained_route.communities, graceful_shutdown_community())
+  |> should.equal(True)
+
+  // Inbound reception of drained route depresses local_pref to 0
+  let inbound_drained = apply_graceful_shutdown_inbound(drained_route)
+  inbound_drained.local_pref |> should.equal(0)
+}
+
+// 12. RFC 2439 Route Flap Damping Tests
+pub fn flap_damping_test() {
+  let cfg = default_damping_config()
+  let assert Ok(_pfx) = parse_prefix("172.20.50.0/24")
+
+  // Initial flap at t=0
+  let h1 = record_flap(None, 0, cfg)
+  h1.penalty |> should.equal(1000.0)
+  h1.flaps_count |> should.equal(1)
+  h1.suppressed |> should.equal(False)
+
+  // Flap again shortly at t=10
+  let h2 = record_flap(Some(h1), 10, cfg)
+  h2.flaps_count |> should.equal(2)
+  h2.suppressed |> should.equal(False)
+
+  // Third flap at t=20 exceeds suppress threshold (2000.0) -> suppressed!
+  let h3 = record_flap(Some(h2), 20, cfg)
+  h3.flaps_count |> should.equal(3)
+  h3.suppressed |> should.equal(True)
+
+  // After 1800s (2 half-lives), penalty decays below reuse_threshold (750) -> suppression lifted
+  let h4 = evaluate_flap(h3, 20 + 1800, cfg)
+  h4.suppressed |> should.equal(False)
+}
+
+// 13. RFC 5575 / RFC 8955 BGP Flowspec Tests
+pub fn flowspec_test() {
+  let assert Ok(pfx) = parse_prefix("172.20.10.0/24")
+  let components = [
+    FlowDstPrefix(pfx),
+    FlowIpProtocol(0x01, 6),
+    FlowDstPort(0x01, 80),
+  ]
+
+  let wire_bin = encode_flowspec_nlri(components)
+  let assert <<_len:8, payload:bits>> = wire_bin
+  let assert Ok(decoded_comps) = decode_flowspec_nlri(payload, AfiIpv4)
+  list.length(decoded_comps) |> should.equal(3)
+
+  let rule =
+    FlowspecRule(
+      id: "ddos-drop-http",
+      afi: AfiIpv4,
+      components: components,
+      actions: [FlowActionDrop],
+      origin_peer: "peer_fra",
+      timestamp: 1000,
+    )
+
+  let rule_str = format_rule(rule)
+  string.contains(rule_str, "dst 172.20.10.0/24") |> should.equal(True)
+  string.contains(rule_str, "proto tcp") |> should.equal(True)
+  string.contains(rule_str, "dport 80") |> should.equal(True)
+  string.contains(rule_str, "DROP") |> should.equal(True)
+
+  let nft_rule = to_nftables_rule(rule)
+  string.contains(nft_rule, "nft add rule inet filter input")
+  |> should.equal(True)
+  string.contains(nft_rule, "ip daddr 172.20.10.0/24") |> should.equal(True)
+  string.contains(nft_rule, "ip protocol tcp th dport 80 drop")
+  |> should.equal(True)
+
+  let ext_comm = encode_action_community(FlowActionDrop, 4_242_420_125)
+  let assert Ok(action) = decode_action_community(ext_comm)
+  action |> should.equal(FlowActionDrop)
+}
+
+// 14. Routing Policy Engine Tests
+pub fn routing_policy_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let r =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_baragoon",
+      timestamp: 1000,
+      path_id: None,
+    )
+
+  let custom_policy =
+    PolicyChain(name: "prefer_baragoon", default_action: ActionAccept, rules: [
+      PolicyRule(
+        name: "boost_baragoon",
+        matches: [MatchAsPathContains(4_242_421_732)],
+        actions: [
+          ActionSetLocalPref(250),
+          ActionPrependAs(4_242_420_125, 1),
+        ],
+      ),
+    ])
+
+  let #(accepted, modified): #(Bool, Route) =
+    policy_filter.evaluate_chain(r, custom_policy)
+  accepted |> should.equal(True)
+  modified.local_pref |> should.equal(250)
+  modified.as_path
+  |> should.equal([AsSequence([4_242_420_125, 4_242_421_732])])
+
+  // DN42 Default Policy rejects bogons
+  let assert Ok(bogon) = parse_prefix("192.168.1.0/24")
+  let bogon_route = Route(..r, prefix: bogon)
+  case
+    policy_filter.filter_inbound_route(
+      bogon_route,
+      policy_filter.dn42_default_import_policy(),
+    )
+  {
+    Error(_) -> True
+    Ok(_) -> False
+  }
+  |> should.equal(True)
+}
+
+// 15. Prometheus Metrics Rendering Tests
+pub fn prometheus_metrics_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let r =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer1",
+      timestamp: 1000,
+      path_id: None,
+    )
+
+  let data =
+    DaemonMetricsData(
+      asn: 4_242_420_125,
+      router_id: Ipv4(172, 22, 64, 129),
+      peers: [],
+      routes: [r],
+      fib_count: 1,
+      roa_count: 5000,
+      flowspec_rules: [],
+      damped_routes: [],
+    )
+
+  let metrics = render_prometheus_metrics(data)
+  string.contains(metrics, "slopbgp_info{version=\"0.1.0\",asn=\"4242420125\"")
+  |> should.equal(True)
+  string.contains(metrics, "slopbgp_loc_rib_routes_total{family=\"ipv4\"} 1")
+  |> should.equal(True)
+  string.contains(metrics, "slopbgp_fib_routes_installed 1")
+  |> should.equal(True)
+  string.contains(metrics, "slopbgp_roa_rules_total 5000")
+  |> should.equal(True)
 }

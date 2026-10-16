@@ -1,14 +1,17 @@
+import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/types.{
-  type PeerStats, type Route, AsSequence, AsSet, OriginEgp, OriginIgp,
-  OriginIncomplete, RoaInvalid, RoaNotFound, RoaValid, StateActive, StateConnect,
-  StateEstablished, StateIdle, StateOpenConfirm, StateOpenSent,
+  type DampedRoute, type FlowspecRule, type PeerStats, type Route, AsSequence,
+  AsSet, OriginEgp, OriginIgp, OriginIncomplete, RoaInvalid, RoaNotFound,
+  RoaValid, StateActive, StateConnect, StateEstablished, StateIdle,
+  StateOpenConfirm, StateOpenSent,
 }
 
 pub fn render_json_status(
@@ -103,6 +106,37 @@ pub fn render_json_fib(fib_entries: List(FibEntry)) -> String {
   |> json.to_string
 }
 
+pub fn render_json_flowspec(rules: List(FlowspecRule)) -> String {
+  let objects =
+    list.map(rules, fn(r) {
+      json.object([
+        #("id", json.string(r.id)),
+        #("description", json.string(format_rule(r))),
+        #("nftables", json.string(to_nftables_rule(r))),
+        #("origin_peer", json.string(r.origin_peer)),
+        #("timestamp", json.int(r.timestamp)),
+      ])
+    })
+  json.preprocessed_array(objects)
+  |> json.to_string
+}
+
+pub fn render_json_damping(damped: List(DampedRoute)) -> String {
+  let objects =
+    list.map(damped, fn(d) {
+      json.object([
+        #("prefix", json.string(prefix_to_string(d.prefix))),
+        #("peer_id", json.string(d.peer_id)),
+        #("penalty", json.float(d.penalty)),
+        #("flaps_count", json.int(d.flaps_count)),
+        #("suppressed", json.bool(d.suppressed)),
+        #("seconds_remaining", json.int(d.seconds_remaining)),
+      ])
+    })
+  json.preprocessed_array(objects)
+  |> json.to_string
+}
+
 pub fn render_dashboard_html(
   asn: Int,
   router_id: String,
@@ -110,6 +144,8 @@ pub fn render_dashboard_html(
   routes: List(Route),
   fib_entries: List(FibEntry),
   roa_count: Int,
+  flowspec_rules: List(FlowspecRule),
+  damped_routes: List(DampedRoute),
 ) -> String {
   let peer_rows =
     list.map(peers, fn(p) {
@@ -147,6 +183,62 @@ pub fn render_dashboard_html(
       <> "</tr>"
     })
     |> string.join("\n")
+
+  let flowspec_rows = case flowspec_rules {
+    [] ->
+      "<tr><td colspan='4' style='text-align:center;color:#8b949e;'>No active Flowspec DDoS rules</td></tr>"
+    _ ->
+      list.map(flowspec_rules, fn(rule) {
+        "<tr>"
+        <> "<td><code>"
+        <> rule.id
+        <> "</code></td>"
+        <> "<td>"
+        <> format_rule(rule)
+        <> "</td>"
+        <> "<td><code>"
+        <> to_nftables_rule(rule)
+        <> "</code></td>"
+        <> "<td>"
+        <> rule.origin_peer
+        <> "</td>"
+        <> "</tr>"
+      })
+      |> string.join("\n")
+  }
+
+  let damping_rows = case damped_routes {
+    [] ->
+      "<tr><td colspan='6' style='text-align:center;color:#8b949e;'>No flapped or suppressed routes</td></tr>"
+    _ ->
+      list.map(damped_routes, fn(d) {
+        let status_badge = case d.suppressed {
+          True -> "<span class='badge badge-danger'>SUPPRESSED</span>"
+          False -> "<span class='badge badge-warning'>DECAYING</span>"
+        }
+        "<tr>"
+        <> "<td><code>"
+        <> prefix_to_string(d.prefix)
+        <> "</code></td>"
+        <> "<td>"
+        <> d.peer_id
+        <> "</td>"
+        <> "<td>"
+        <> int.to_string(float.round(d.penalty))
+        <> "</td>"
+        <> "<td>"
+        <> int.to_string(d.flaps_count)
+        <> "</td>"
+        <> "<td>"
+        <> status_badge
+        <> "</td>"
+        <> "<td>"
+        <> int.to_string(d.seconds_remaining)
+        <> "s</td>"
+        <> "</tr>"
+      })
+      |> string.join("\n")
+  }
 
   let route_rows =
     list.map(routes, fn(r) {
@@ -338,6 +430,14 @@ pub fn render_dashboard_html(
       <div class=\"stat-label\">ROA Validations</div>
       <div class=\"stat-val\">" <> int.to_string(roa_count) <> "</div>
     </div>
+    <div class=\"stat-card\">
+      <div class=\"stat-label\">Flowspec DDoS Rules</div>
+      <div class=\"stat-val\">" <> int.to_string(list.length(flowspec_rules)) <> "</div>
+    </div>
+    <div class=\"stat-card\">
+      <div class=\"stat-label\">Flap Damped Routes</div>
+      <div class=\"stat-val\">" <> int.to_string(list.length(damped_routes)) <> "</div>
+    </div>
   </div>
 
   <div class=\"card\">
@@ -379,10 +479,46 @@ pub fn render_dashboard_html(
     </table>
   </div>
 
+  <div class=\"card\">
+    <h2>RFC 5575 / RFC 8955 BGP Flowspec (DDoS Mitigation Rules)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rule ID</th>
+          <th>Flow Specification Match</th>
+          <th>Kernel Firewall Rule (nftables)</th>
+          <th>Origin Peer</th>
+        </tr>
+      </thead>
+      <tbody>
+        " <> flowspec_rows <> "
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 2439 Route Flap Damping</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Prefix</th>
+          <th>Peer</th>
+          <th>Penalty</th>
+          <th>Flaps</th>
+          <th>Status</th>
+          <th>Suppressed Remaining</th>
+        </tr>
+      </thead>
+      <tbody>
+        " <> damping_rows <> "
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; https://git.freifick.net/slop/slopbgp
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a>
   </footer>
 </body>
 </html>"

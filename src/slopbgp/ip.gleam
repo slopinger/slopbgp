@@ -3,7 +3,9 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import slopbgp/types.{type IpAddress, type IpPrefix, IpPrefix, Ipv4, Ipv6}
+import slopbgp/types.{
+  type Afi, type IpAddress, type IpPrefix, AfiIpv4, IpPrefix, Ipv4, Ipv6,
+}
 
 pub fn ipv4_to_string(ip: IpAddress) -> String {
   case ip {
@@ -416,6 +418,52 @@ fn decode_prefixes_ipv6_loop(
           ])
         }
         _ -> Error("Invalid IPv6 prefix length in NLRI")
+      }
+    }
+  }
+}
+
+pub fn decode_single_prefix(
+  bytes: BitArray,
+  afi: Afi,
+) -> Result(#(IpPrefix, BitArray), String) {
+  case afi {
+    AfiIpv4 -> {
+      case bytes {
+        <<len:8, rest:bits>> if len <= 32 -> {
+          let octets_needed = case len {
+            0 -> 0
+            _ -> { len + 7 } / 8
+          }
+          use #(prefix_bytes, rem) <- result.try(
+            split_bytes(rest, octets_needed)
+            |> result.replace_error("Truncated IPv4 prefix in NLRI"),
+          )
+          let padded_bytes = pad_to_bytes(prefix_bytes, 4)
+          use ip <- result.try(bytes_to_ipv4(padded_bytes))
+          let normalized = normalize_ipv4(ip, len)
+          Ok(#(IpPrefix(normalized, len), rem))
+        }
+        _ -> Error("Invalid IPv4 prefix in NLRI")
+      }
+    }
+    _ -> {
+      case bytes {
+        <<len:8, rest:bits>> if len <= 128 -> {
+          let octets_needed = case len {
+            0 -> 0
+            _ -> { len + 7 } / 8
+          }
+          use #(prefix_bytes, rem) <- result.try(
+            split_bytes(rest, octets_needed)
+            |> result.replace_error("Truncated IPv6 prefix in NLRI"),
+          )
+          let padded_bytes = pad_to_bytes(prefix_bytes, 16)
+          use ip <- result.try(bytes_to_ipv6(padded_bytes))
+          let normalized = normalize_ipv6(ip, len)
+          Ok(#(IpPrefix(normalized, len), rem))
+        }
+        _ -> Error("Invalid IPv6 prefix in NLRI")
       }
     }
   }

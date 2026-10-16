@@ -10,7 +10,9 @@
     tcp_peername/1,
     tcp_setopts/2,
     parse_ip_tuple/1,
-    get_args/0
+    get_args/0,
+    math_pow/2,
+    math_log/1
 ]).
 
 get_args() ->
@@ -113,3 +115,15 @@ parse_ip_tuple(Bin) when is_binary(Bin) ->
     end;
 parse_ip_tuple(_) ->
     {error, einval}.
+
+math_pow(Base, Exp) when is_integer(Base) ->
+    math_pow(float(Base), Exp);
+math_pow(Base, Exp) when is_integer(Exp) ->
+    math_pow(Base, float(Exp));
+math_pow(Base, Exp) ->
+    math:pow(Base, Exp).
+
+math_log(Val) when is_integer(Val) ->
+    math:log(float(Val));
+math_log(Val) ->
+    math:log(Val).

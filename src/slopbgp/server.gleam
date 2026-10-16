@@ -3,22 +3,31 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import simplifile
+import slopbgp/bgp/damping.{
+  type DampingTable, default_damping_config,
+  get_damped_routes as damping_get_damped, new_table as new_damping_table,
+  register_flap,
+}
 import slopbgp/bgp/fsm.{EventHoldTimerExpires, EventKeepaliveTimerExpires}
+import slopbgp/bgp/graceful_shutdown.{apply_graceful_shutdown_outbound}
 import slopbgp/bgp/message.{encode_message}
 import slopbgp/config.{type DaemonConfig}
 import slopbgp/dn42/roa.{parse_roa_content}
 import slopbgp/fib/kernel.{type FibEntry, type FibState, new_fib, sync_fib}
+import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
 import slopbgp/net/socket.{now, send}
 import slopbgp/peer.{
   type PeerHandle, PeerHandle, extract_routes_from_update, handle_peer_event,
   new_peer, process_fsm_actions,
 }
+import slopbgp/policy/filter.{dn42_default_import_policy, filter_inbound_route}
 import slopbgp/rib/rib.{
   type Rib, get_all_routes, insert_route, new_rib, prepare_outbound_route,
   withdraw_all_from_peer, withdraw_route,
 }
 import slopbgp/types.{
-  type BgpMessage, type PeerConfig, type PeerStats, type RoaEntry, type Route,
+  type BgpMessage, type DampedRoute, type DampingConfig, type FlowspecRule,
+  type PeerConfig, type PeerStats, type PolicyChain, type RoaEntry, type Route,
   AttrAsPath, AttrCommunities, AttrLargeCommunities, AttrLocalPref, AttrMed,
   AttrNextHop, AttrOrigin, MsgUpdate, PeerStats, StateEstablished,
 }
@@ -32,6 +41,11 @@ pub type ServerState {
     roa_table: List(RoaEntry),
     started_at: Int,
     event_log: List(String),
+    damping_table: DampingTable,
+    damping_config: DampingConfig,
+    flowspec_rules: List(FlowspecRule),
+    drained_peers: List(String),
+    import_policy: PolicyChain,
   )
 }
 
@@ -47,6 +61,11 @@ pub fn new_server(config: DaemonConfig) -> ServerState {
       roa_table: [],
       started_at: now(),
       event_log: ["[init] slopbgp server initialized"],
+      damping_table: new_damping_table(),
+      damping_config: default_damping_config(),
+      flowspec_rules: [],
+      drained_peers: [],
+      import_policy: dn42_default_import_policy(),
     )
 
   // Load configured peers
@@ -180,7 +199,7 @@ pub fn ingest_peer_update(
   case dict.get(state.peers, peer_id) {
     Error(_) -> state
     Ok(peer_handle) -> {
-      let #(learned, withdrawn) =
+      let #(raw_learned, withdrawn) =
         extract_routes_from_update(
           update_msg,
           peer_id,
@@ -188,6 +207,20 @@ pub fn ingest_peer_update(
           state.roa_table,
           now_time,
         )
+
+      // Filter inbound learned routes with Policy Engine and Drain mode
+      let is_drained = list.contains(state.drained_peers, peer_id)
+      let learned =
+        list.filter_map(raw_learned, fn(route) {
+          let initial = case is_drained {
+            True -> types.Route(..route, local_pref: 0)
+            False -> route
+          }
+          case filter_inbound_route(initial, state.import_policy) {
+            Ok(r) -> Ok(r)
+            Error(_) -> Error(Nil)
+          }
+        })
 
       // Insert learned routes into RIB
       let #(rib_after_learn, new_best_routes) =
@@ -200,17 +233,30 @@ pub fn ingest_peer_update(
           }
         })
 
-      // Withdraw routes from RIB
-      let rib_final =
-        list.fold(withdrawn, rib_after_learn, fn(curr_rib, prefix) {
-          let #(upd_rib, _) = withdraw_route(curr_rib, peer_id, prefix)
-          upd_rib
-        })
+      // Withdraw routes from RIB and record RFC 2439 flap damping penalties
+      let #(rib_final, upd_damping) =
+        list.fold(
+          withdrawn,
+          #(rib_after_learn, state.damping_table),
+          fn(acc, prefix) {
+            let #(curr_rib, d_tab) = acc
+            let #(upd_rib, _) = withdraw_route(curr_rib, peer_id, prefix)
+            let #(new_d_tab, _) =
+              register_flap(
+                d_tab,
+                peer_id,
+                prefix,
+                now_time,
+                state.damping_config,
+              )
+            #(upd_rib, new_d_tab)
+          },
+        )
 
       // Propagate changed best routes to other peers (Adj-RIB-Out)
       let state_propagated =
         propagate_routes_to_peers(
-          ServerState(..state, rib: rib_final),
+          ServerState(..state, rib: rib_final, damping_table: upd_damping),
           new_best_routes,
           peer_id,
         )
@@ -258,6 +304,9 @@ fn propagate_routes_to_peers(
             case target_peer.fsm.state == StateEstablished {
               False -> acc
               True -> {
+                let target_is_drained =
+                  list.contains(acc.drained_peers, target_peer_id)
+
                 // Prepare outbound routes for this peer
                 let outbound_routes =
                   list.filter_map(routes_to_send, fn(r) {
@@ -268,7 +317,13 @@ fn propagate_routes_to_peers(
                         target_peer.config.local_ip,
                       )
                     {
-                      Some(prepared) -> Ok(prepared)
+                      Some(prepared) -> {
+                        // RFC 8326 Graceful Shutdown: attach community & drop local_pref if drained
+                        case target_is_drained {
+                          True -> Ok(apply_graceful_shutdown_outbound(prepared))
+                          False -> Ok(prepared)
+                        }
+                      }
                       None -> Error(Nil)
                     }
                   })
@@ -319,6 +374,88 @@ fn propagate_routes_to_peers(
       })
     }
   }
+}
+
+/// Drain a peer session gracefully (RFC 8326 Graceful Shutdown)
+pub fn drain_peer(state: ServerState, peer_id: String) -> ServerState {
+  case list.contains(state.drained_peers, peer_id) {
+    True -> state
+    False -> {
+      let updated_drained = [peer_id, ..state.drained_peers]
+      let log_msg = "[drain] Peer " <> peer_id <> " entered graceful drain mode"
+      ServerState(..state, drained_peers: updated_drained, event_log: [
+        log_msg,
+        ..state.event_log
+      ])
+    }
+  }
+}
+
+/// Undrain a peer session, restoring normal priority
+pub fn undrain_peer(state: ServerState, peer_id: String) -> ServerState {
+  let updated_drained = list.filter(state.drained_peers, fn(p) { p != peer_id })
+  let log_msg = "[undrain] Peer " <> peer_id <> " exited drain mode (restored)"
+  ServerState(..state, drained_peers: updated_drained, event_log: [
+    log_msg,
+    ..state.event_log
+  ])
+}
+
+pub fn is_peer_drained(state: ServerState, peer_id: String) -> Bool {
+  list.contains(state.drained_peers, peer_id)
+}
+
+/// Add an RFC 5575 / RFC 8955 Flowspec rule
+pub fn add_flowspec_rule(
+  state: ServerState,
+  rule: FlowspecRule,
+) -> ServerState {
+  let updated_rules = [rule, ..state.flowspec_rules]
+  let log_msg = "[flowspec] Added rule " <> rule.id
+  ServerState(..state, flowspec_rules: updated_rules, event_log: [
+    log_msg,
+    ..state.event_log
+  ])
+}
+
+/// Remove a Flowspec rule by ID
+pub fn delete_flowspec_rule(
+  state: ServerState,
+  rule_id: String,
+) -> ServerState {
+  let updated_rules =
+    list.filter(state.flowspec_rules, fn(r) { r.id != rule_id })
+  let log_msg = "[flowspec] Deleted rule " <> rule_id
+  ServerState(..state, flowspec_rules: updated_rules, event_log: [
+    log_msg,
+    ..state.event_log
+  ])
+}
+
+pub fn get_flowspec_rules(state: ServerState) -> List(FlowspecRule) {
+  state.flowspec_rules
+}
+
+pub fn get_damped_routes(
+  state: ServerState,
+  now_time: Int,
+) -> List(DampedRoute) {
+  damping_get_damped(state.damping_table, now_time, state.damping_config)
+}
+
+pub fn get_prometheus_metrics(state: ServerState) -> String {
+  let metrics_data =
+    DaemonMetricsData(
+      asn: state.config.asn,
+      router_id: state.config.router_id,
+      peers: get_peer_stats_list(state),
+      routes: get_all_routes(state.rib),
+      fib_count: list.length(get_fib_routes(state)),
+      roa_count: list.length(state.roa_table),
+      flowspec_rules: state.flowspec_rules,
+      damped_routes: get_damped_routes(state, now()),
+    )
+  render_prometheus_metrics(metrics_data)
 }
 
 pub fn get_peer_stats_list(state: ServerState) -> List(PeerStats) {

@@ -19,6 +19,7 @@ pub type Safi {
   SafiUnicast
   SafiMulticast
   SafiMplsVpn
+  SafiFlowspec
   SafiUnknown(Int)
 }
 
@@ -186,5 +187,111 @@ pub type PeerStats {
     keepalives_received: Int,
     keepalives_sent: Int,
     last_error: Option(String),
+  )
+}
+
+// RFC 5575 / RFC 8955 BGP Flowspec (DDoS Mitigation Rules)
+pub type FlowspecComponent {
+  FlowDstPrefix(IpPrefix)
+  FlowSrcPrefix(IpPrefix)
+  FlowIpProtocol(op: Int, value: Int)
+  FlowPort(op: Int, value: Int)
+  FlowDstPort(op: Int, value: Int)
+  FlowSrcPort(op: Int, value: Int)
+  FlowIcmpType(op: Int, value: Int)
+  FlowIcmpCode(op: Int, value: Int)
+  FlowTcpFlags(op: Int, value: Int)
+  FlowPacketLength(op: Int, value: Int)
+  FlowDscp(op: Int, value: Int)
+}
+
+pub type FlowspecAction {
+  FlowActionDrop
+  FlowActionRateLimit(rate_bytes_sec: Float)
+  FlowActionSample
+  FlowActionMarkDscp(Int)
+  FlowActionRedirect(asn: Int, target: Int)
+}
+
+pub type FlowspecRule {
+  FlowspecRule(
+    id: String,
+    afi: Afi,
+    components: List(FlowspecComponent),
+    actions: List(FlowspecAction),
+    origin_peer: String,
+    timestamp: Int,
+  )
+}
+
+// RFC 2439 Route Flap Damping
+pub type FlapHistory {
+  FlapHistory(
+    penalty: Float,
+    flaps_count: Int,
+    last_flap: Int,
+    suppressed: Bool,
+    suppressed_until: Int,
+  )
+}
+
+pub type DampingConfig {
+  DampingConfig(
+    half_life_seconds: Int,
+    reuse_threshold: Float,
+    suppress_threshold: Float,
+    max_suppress_seconds: Int,
+    penalty_per_flap: Float,
+  )
+}
+
+pub type DampedRoute {
+  DampedRoute(
+    prefix: IpPrefix,
+    peer_id: String,
+    penalty: Float,
+    flaps_count: Int,
+    suppressed: Bool,
+    seconds_remaining: Int,
+  )
+}
+
+// Routing Policy DSL
+pub type PolicyMatch {
+  MatchAny
+  MatchPrefix(prefix: IpPrefix, min_len: Int, max_len: Int)
+  MatchAsPathContains(asn: Int)
+  MatchAsPathOrigin(asn: Int)
+  MatchAsLength(max_length: Int)
+  MatchCommunity(Community)
+  MatchLargeCommunity(LargeCommunity)
+  MatchRoa(RoaStatus)
+}
+
+pub type PolicyAction {
+  ActionAccept
+  ActionReject
+  ActionSetLocalPref(Int)
+  ActionSetMed(Int)
+  ActionPrependAs(asn: Int, times: Int)
+  ActionAddCommunity(Community)
+  ActionAddLargeCommunity(LargeCommunity)
+  ActionRemoveCommunity(Community)
+  ActionSetNextHop(IpAddress)
+}
+
+pub type PolicyRule {
+  PolicyRule(
+    name: String,
+    matches: List(PolicyMatch),
+    actions: List(PolicyAction),
+  )
+}
+
+pub type PolicyChain {
+  PolicyChain(
+    name: String,
+    default_action: PolicyAction,
+    rules: List(PolicyRule),
   )
 }

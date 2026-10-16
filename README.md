@@ -43,6 +43,9 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 6811** | BGP Prefix Origin Validation (ROA Route Origin Authorization) | Full |
 | **RFC 9234** | Route Leak Prevention and Detection (BGP Roles & OTC Attribute) | Full |
 | **RFC 7606** | Revised Error Handling for BGP UPDATE Messages (treat-as-withdraw) | Full |
+| **RFC 2439** | BGP Route Flap Damping (exponential decay, suppression & reuse thresholds) | Full |
+| **RFC 8326** | Graceful BGP Session Shutdown (well-known community `65535:0` / `GRACEFUL_SHUTDOWN`) | Full |
+| **RFC 5575 / 8955** | Dissemination of Flow Specification Rules (BGP Flowspec IPv4 & nftables compilation) | Full |
 
 ---
 
@@ -76,18 +79,64 @@ The decision engine chooses the best path using an 8-stage tie-breaking algorith
 
 ---
 
+## Policy Engine & DN42 Filters
+
+`slopbgp` features a composable, deterministic routing policy rule engine:
+
+* **Policy Matchers**: Prefix filters (exact or subnet match), AS-Path regex/contains, AS-Path origin AS, AS-Path length limits, standard Communities, RFC 8092 Large Communities, and RFC 6811 ROA validation states (`VALID`, `INVALID`, `NOT_FOUND`).
+* **Policy Actions**: `Accept`, `Reject`, `SetLocalPref(int)`, `SetMed(int)`, `PrependAs(asn, count)`, `AddCommunity(c)`, `RemoveCommunity(c)`, and `SetNextHop(ip)`.
+* **DN42 Default Import/Export Chains**: Pre-configured with bogon drop rules, martian filtering, ROA enforcement, and DN42 community rewriting out-of-the-box.
+
+---
+
+## BGP Flowspec (RFC 5575 / RFC 8955) & nftables
+
+Protect your autonomous system and peering links from denial-of-service floods:
+
+* **Flowspec Component Dissemination**: Full binary parser and encoder for Type 1 (Destination Prefix), Type 2 (Source Prefix), Type 3 (IP Protocol: TCP, UDP, ICMP), Type 4 (Port), Type 5 (Destination Port), Type 6 (Source Port), Type 7 (ICMP Type), Type 8 (ICMP Code), Type 9 (TCP Flags: SYN, ACK, FIN, RST), Type 10 (Packet Length), and Type 11 (DSCP).
+* **Flowspec Actions**: Extended communities for Traffic-Rate (`0x8006`, drop or rate-limit bytes/sec), Traffic-Action (`0x8007`, sample & terminal), Redirect (`0x8008`), and Traffic-Marking (`0x8009`, DSCP re-marking).
+* **nftables Compilation**: Directly compiles BGP Flowspec rules into kernel `nftables` syntax (`nft add rule inet slopbgp ddos_filter ... drop`) for wire-speed line-rate packet discarding.
+
+---
+
+## RFC 2439 Route Flap Damping
+
+Prevent unstable upstream links or oscillating routes from overwhelming CPU and forwarding tables:
+
+* **Mathematical Half-Life Decay**: Calculates real-time exponential penalty decay:
+  $$P(t) = P_0 \cdot \left(\frac{1}{2}\right)^{\frac{\Delta t}{\tau}}$$
+* **Suppression & Reuse Thresholds**: Routes exceeding the cut-off penalty (default 2000) are automatically suppressed from Loc-RIB and FIB installation. Once the penalty decays below the reuse threshold (default 750), the route is unsuppressed.
+* **Bounded Suppression**: Hard ceiling on maximum suppression duration (default 3600 seconds) prevents permanent route blackholing.
+
+---
+
+## RFC 8326 Graceful BGP Session Shutdown
+
+Perform hitless, zero-packet-loss maintenance on routers and peering links:
+
+* **Well-Known Community**: Attaches `65535:0` (`GRACEFUL_SHUTDOWN`) on outbound UPDATE messages before link teardown.
+* **Inbound Local Preference Depressing**: Upon receiving routes with the graceful shutdown community, `slopbgp` automatically lowers `local_pref` to 0, shifting transit traffic away to alternate paths before TCP teardown.
+* **Dynamic Operator Drain**: Drain and restore individual peers dynamically via `slopbgpctl drain <peer_ip>` and `slopbgpctl undrain <peer_ip>`.
+
+---
+
 ## Built-In Web Dashboard & JSON REST API
 
 `slopbgp` includes a built-in reactive HTTP server (default `http://127.0.0.1:9179`):
 
-* **Interactive Dark-Mode Dashboard**: Visual cards for AS number, active sessions, prefix counts, kernel FIB entries, and ROA rules.
+* **Interactive Dark-Mode Dashboard**: Visual cards for AS number, active sessions, prefix counts, kernel FIB entries, ROA rules, active Flowspec filters, and suppressed damped routes.
 * **Live Peers Table**: Real-time FSM states (Established, OpenConfirm, Connect), prefix counters, keepalives, and uptime.
 * **Loc-RIB Table**: Searchable route table showing prefixes, next hops, AS paths, local prefs, and ROA validation badges.
+* **DDoS Flowspec & Damping Views**: Dedicated inspection cards for active DDoS mitigation rules and route flap suppression timers.
+* **Prometheus Metrics Exporter**: Native `/metrics` endpoint exposing OpenMetrics/Prometheus counters and gauges for Grafana dashboards.
 * **REST API**:
   * `GET /api/status`: JSON daemon summary
   * `GET /api/peers`: JSON peer status list
   * `GET /api/routes`: JSON active best routes
   * `GET /api/fib`: JSON kernel forwarding table entries
+  * `GET /api/flowspec`: JSON active Flowspec DDoS rules
+  * `GET /api/damping`: JSON route flap damping history and suppressed paths
+  * `GET /metrics`: Prometheus metric exposition
 
 ---
 
@@ -108,6 +157,23 @@ slopbgpctl routes 172.22.64
 
 # Query Kernel FIB entries
 slopbgpctl fib
+
+# Inspect Route Flap Damping suppression table
+slopbgpctl flap
+
+# Inspect and manage active BGP Flowspec DDoS mitigation rules
+slopbgpctl flowspec
+slopbgpctl flowspec add 172.22.64.200/32 17 --rate 0
+
+# Gracefully drain / undrain a BGP peer session (RFC 8326)
+slopbgpctl drain 172.22.64.130
+slopbgpctl undrain 172.22.64.130
+
+# Inspect configured routing policies
+slopbgpctl policy
+
+# Scrape live Prometheus metrics
+slopbgpctl metrics
 
 # Perform instantaneous RFC 6811 ROA origin validation
 slopbgpctl roa check 172.22.64.128/27 4242420125
