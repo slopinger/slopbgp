@@ -1,0 +1,17 @@
+name = "slopbgp"
+version = "0.1.0"
+description = "slopbgp: revolutionary BGP-4 & MP-BGP routing daemon in Gleam for DN42 and modern networks"
+licences = ["MIT"]
+repository = { type = "gitlab", user = "slop", repo = "slopbgp", host = "git.freifick.net" }
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 0.60.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+gleam_otp = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"
+envoy = ">= 1.0.0 and < 2.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

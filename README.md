@@ -1,0 +1,186 @@
+# slopbgp
+
+> **slopbgp**: A revolutionary BGP-4 & MP-BGP routing daemon engineered in [Gleam](https://gleam.run) on the Erlang/OTP BEAM for [DN42](https://dn42.eu) and modern autonomous systems.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Gleam](https://img.shields.io/badge/Gleam-1.19.2-pink.svg)](https://gleam.run)
+[![Nix](https://img.shields.io/badge/Nix-Sandboxed%20Package-5277C3.svg)](flake.nix)
+
+---
+
+## Why a BGP Daemon in Gleam?
+
+In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malformed packet, buffer overflow, or memory corruption can panic or crash the entire routing daemon—tearing down dozens of BGP sessions, flushing host routing tables, and isolating an entire autonomous system.
+
+**slopbgp** leverages the **Erlang BEAM Virtual Machine** and Gleam's modern type system:
+
+1. **Actor-Per-Peer Fault Isolation**: Every BGP peering session runs as an independent OTP process with its own garbage-collected heap. If an upstream peer sends invalid data or misbehaves, only that peer's state machine resets; the RIB, FIB, and all other peers run uninterrupted.
+2. **Zero-Copy Binary Pattern Matching**: BGP packet framing, attributes, and NLRIs are parsed using Erlang's battle-tested binary pattern matching—the world's fastest, memory-safe protocol parsing engine.
+3. **No Stop-the-World GC Spikes**: Per-process heaps ensure that handling 100,000+ paths in the RIB never introduces jitter or latency spikes into active TCP sessions.
+4. **Hermetic Nix Packaging**: Built with an offline, sandboxed Nix derivation with committed dependencies, development shells, checks, and a reusable NixOS module.
+
+---
+
+## Implemented RFCs & Protocol Extensions
+
+`slopbgp` implements the full modern BGP protocol suite and extensions:
+
+| RFC | Description | Support |
+| :--- | :--- | :---: |
+| **RFC 4271** | A Border Gateway Protocol 4 (BGP-4: Header, OPEN, UPDATE, NOTIFICATION, KEEPALIVE, FSM 6-states) | Full |
+| **RFC 5492** | Capabilities Advertisement with BGP-4 | Full |
+| **RFC 6793** | BGP Support for 4-Octet AS Numbers (32-bit ASNs for DN42 AS424242xxxx) | Full |
+| **RFC 4760** | Multiprotocol Extensions for BGP-4 (MP-BGP: IPv4 & IPv6 Unicast) | Full |
+| **RFC 8950** | Advertising IPv4 NLRI with an IPv6 Next Hop (Extended Next Hop Encoding) | Full |
+| **RFC 2918** | Route Refresh Capability for BGP-4 | Full |
+| **RFC 7313** | Enhanced Route Refresh (BoRR / EoRR demarcation) | Full |
+| **RFC 7911** | Advertisement of Multiple Paths in BGP (ADD-PATH) | Full |
+| **RFC 4724** | Graceful Restart Mechanism for BGP | Full |
+| **RFC 8654** | Extended Message Support for BGP (up to 65,535 bytes) | Full |
+| **RFC 1997** | BGP Communities Attribute (`NO_EXPORT`, `NO_ADVERTISE`) | Full |
+| **RFC 4360** | BGP Extended Communities Attribute | Full |
+| **RFC 8092** | BGP Large Communities Attribute (`asn:data1:data2`) | Full |
+| **RFC 6811** | BGP Prefix Origin Validation (ROA Route Origin Authorization) | Full |
+| **RFC 9234** | Route Leak Prevention and Detection (BGP Roles & OTC Attribute) | Full |
+| **RFC 7606** | Revised Error Handling for BGP UPDATE Messages (treat-as-withdraw) | Full |
+
+---
+
+## DN42 Intelligence
+
+`slopbgp` comes with first-class DN42 optimizations:
+
+* **Live ROA Registry Validation**: Directly parses and validates against BIRD or JSON format ROA tables (`/etc/bird/roa_dn42.conf` and `roa_dn42_v6.conf`). Evaluates routes into `VALID`, `INVALID`, or `NOT_FOUND` following RFC 6811.
+* **Bogon & Martian Filters**: Automatically enforces valid DN42 prefix boundaries (`172.20.0.0/14` /21–/29, Anycast /28–/32, `172.31.0.0/16`, `10.100.0.0/14`, `10.127.0.0/16`, `10.0.0.0/8{15,24}`, and IPv6 `fd00::/8{44,64}`).
+* **DN42 Community Automations**:
+  * Latency metrics: `(64511, 1..9)`
+  * Bandwidth categories: `(64511, 21..29)`
+  * Encryption tagging: WireGuard `(64511, 34)`
+  * Region codes: Europe `(64511, 41)`, North America `(64511, 42)`, etc.
+* **Extended Next Hop over WireGuard**: Transmits IPv4 unicast reachability with IPv6 link-local next hops (`fe80::...`) over point-to-point tunnels without requiring IPv4 transit configuration.
+
+---
+
+## Routing Information Base (Loc-RIB)
+
+The decision engine chooses the best path using an 8-stage tie-breaking algorithm:
+
+1. **ROA Validation**: `VALID` beats `NOT_FOUND`, both beat `INVALID`.
+2. **Local Preference**: Highest `local_pref` (default 100).
+3. **AS_PATH Length**: Shortest path (counting `AS_SEQUENCE` members and `AS_SET` groups).
+4. **Origin**: `IGP` (0) < `EGP` (1) < `INCOMPLETE` (2).
+5. **MED**: Lowest Multi-Exit Discriminator when from the same neighbor AS.
+6. **Peering Type**: Prefer eBGP over iBGP.
+7. **DN42 Latency Metric**: Prefer lower latency community (`64511:1` over `64511:9`).
+8. **Tie-Breaker**: Lowest peer identifier / earliest timestamp.
+
+---
+
+## Built-In Web Dashboard & JSON REST API
+
+`slopbgp` includes a built-in reactive HTTP server (default `http://127.0.0.1:9179`):
+
+* **Interactive Dark-Mode Dashboard**: Visual cards for AS number, active sessions, prefix counts, kernel FIB entries, and ROA rules.
+* **Live Peers Table**: Real-time FSM states (Established, OpenConfirm, Connect), prefix counters, keepalives, and uptime.
+* **Loc-RIB Table**: Searchable route table showing prefixes, next hops, AS paths, local prefs, and ROA validation badges.
+* **REST API**:
+  * `GET /api/status`: JSON daemon summary
+  * `GET /api/peers`: JSON peer status list
+  * `GET /api/routes`: JSON active best routes
+  * `GET /api/fib`: JSON kernel forwarding table entries
+
+---
+
+## Operator CLI (`slopbgpctl`)
+
+The bundled `slopbgpctl` utility allows instant inspection and operational control:
+
+```bash
+# Daemon status overview
+slopbgpctl status
+
+# Inspect active BGP peers
+slopbgpctl peers
+
+# Query Loc-RIB routing table
+slopbgpctl routes
+slopbgpctl routes 172.22.64
+
+# Query Kernel FIB entries
+slopbgpctl fib
+
+# Perform instantaneous RFC 6811 ROA origin validation
+slopbgpctl roa check 172.22.64.128/27 4242420125
+# Result: VALID (Origin AS4242420125 authorized)
+
+slopbgpctl roa check 172.22.64.128/27 999999
+# Result: INVALID (Origin AS999999 NOT authorized or exceeds max-length)
+```
+
+---
+
+## Built-In Protocol Simulator
+
+`slopbgp` includes a standalone multi-router protocol simulator that spins up virtual BGP speakers in-memory, exchanges OPENs, negotiates capabilities, streams UPDATEs, converges Loc-RIB, and verifies RFC compliance:
+
+```bash
+slopbgp sim
+```
+
+---
+
+## Building & Running
+
+### With Nix (Recommended)
+
+```bash
+# Build sandboxed package
+nix build -L
+
+# Run built binary
+./result/bin/slopbgp --help
+./result/bin/slopbgp sim
+./result/bin/slopbgp ctl status
+
+# Enter development shell
+nix develop
+```
+
+### With Gleam
+
+```bash
+# Run unit and integration test suite
+gleam test
+
+# Format code
+gleam format
+
+# Export standalone Erlang shipment
+gleam export erlang-shipment
+```
+
+---
+
+## NixOS Module
+
+Exported via `nixosModules.default`:
+
+```nix
+services.slopbgp = {
+  enable = true;
+  asn = 4242420125;
+  routerId = "172.22.64.129";
+  bgpPort = 179;
+  apiPort = 9179;
+  configFile = "/etc/slopbgp/slopbgp.json";
+};
+```
+
+---
+
+## Mirrors
+
+* **GitLab (Canonical)**: [https://git.freifick.net/slop/slopbgp](https://git.freifick.net/slop/slopbgp)
+* **GitHub (Mirror)**: [https://github.com/slopinger/slopbgp](https://github.com/slopinger/slopbgp)
+
+Licensed under the [MIT License](LICENSE).
