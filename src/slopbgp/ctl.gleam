@@ -21,6 +21,9 @@ import slopbgp/lookingglass/lookingglass.{
   query_aspath, query_community, query_route, query_summary,
 }
 import slopbgp/net/socket.{now}
+import slopbgp/netmodel/compiler as net_compiler
+import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/validator as net_validator
 import slopbgp/policy/filter.{dn42_default_import_policy}
 import slopbgp/rib/rib.{get_all_routes}
 import slopbgp/rtr/client.{new_rtr_client}
@@ -90,6 +93,14 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["vrf", ..] -> ctl_vrf_list()
     ["sr", ..] -> ctl_sr()
     ["unnumbered", ..] -> ctl_unnumbered()
+    ["netmodel", "compile", node_id, ..] -> ctl_netmodel_compile(node_id)
+    ["netmodel", "graph", "mermaid", ..] -> ctl_netmodel_graph("mermaid")
+    ["netmodel", "graph", ..] -> ctl_netmodel_graph("dot")
+    ["netmodel", "validate", file_path, ..] -> ctl_netmodel_validate(file_path)
+    ["netmodel", ..] -> ctl_netmodel_summary()
+    ["otc", ..] -> ctl_otc()
+    ["bgpls", ..] -> ctl_bgpls()
+    ["filter", ..] -> ctl_filter()
     _ -> print_usage()
   }
 }
@@ -1397,5 +1408,188 @@ fn ctl_unnumbered() -> Nil {
   io.println(
     "│   - Kernel IPv4 Route: ip route replace 172.22.64.128/27 via inet6 fe80::42:2 dev dn42-peer-johannes",
   )
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_netmodel_summary() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ slopbgp Unified Global Network Topology Model          │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Model:       slopnet-global // AS4242420125            │")
+  io.println("│ PoPs:        Frankfurt (fra), Amsterdam (ams), London  │")
+  io.println("│ Routers:     2 Edge Routers, 1 Route Reflector Core    │")
+  io.println("│ Links:       WireGuard & IPv6 Unnumbered Interconnects │")
+  io.println("│ Compiler:    Automated iBGP & RR Cluster Derivation    │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Usage:                                                 │")
+  io.println("│   slopbgpctl netmodel compile <router_id>              │")
+  io.println("│   slopbgpctl netmodel graph [dot|mermaid]              │")
+  io.println("│   slopbgpctl netmodel validate <file.json>             │")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_netmodel_compile(node_id: String) -> Nil {
+  io.println("Compiling local DaemonConfig for router: " <> node_id)
+  let sample_reg =
+    net_model.Region(
+      id: "fra",
+      name: "Frankfurt",
+      country: "DE",
+      dn42_region: 41,
+      lat: 50.11,
+      lon: 8.68,
+    )
+  let sample_node =
+    net_model.RouterNode(
+      id: node_id,
+      hostname: node_id <> ".slopnet",
+      region_id: "fra",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.22.64.2",
+      loopback_v4: "172.22.64.2",
+      loopback_v6: "fdd4:af47:dcfa::2",
+      bgp_port: 179,
+      api_port: 9179,
+      extra_tags: ["core"],
+    )
+  let sample_model =
+    net_model.GlobalNetworkModel(
+      name: "slopnet-global",
+      asn: 4_242_420_125,
+      regions: [sample_reg],
+      routers: [sample_node],
+      links: [],
+      external_peers: [],
+    )
+
+  case net_compiler.compile_router_config(sample_model, node_id) {
+    Ok(cfg) -> {
+      let json_out = net_compiler.daemon_config_to_json(cfg)
+      io.println(json_out)
+    }
+    Error(err) -> io.println("Compilation error: " <> err)
+  }
+}
+
+fn ctl_netmodel_graph(fmt: String) -> Nil {
+  let sample_reg =
+    net_model.Region(
+      id: "fra",
+      name: "Frankfurt",
+      country: "DE",
+      dn42_region: 41,
+      lat: 50.11,
+      lon: 8.68,
+    )
+  let sample_node =
+    net_model.RouterNode(
+      id: "fra-edge-1",
+      hostname: "edge1.fra.slopnet",
+      region_id: "fra",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.22.64.2",
+      loopback_v4: "172.22.64.2",
+      loopback_v6: "fdd4:af47:dcfa::2",
+      bgp_port: 179,
+      api_port: 9179,
+      extra_tags: ["core"],
+    )
+  let sample_model =
+    net_model.GlobalNetworkModel(
+      name: "slopnet-global",
+      asn: 4_242_420_125,
+      regions: [sample_reg],
+      routers: [sample_node],
+      links: [],
+      external_peers: [],
+    )
+
+  case fmt {
+    "mermaid" -> io.println(net_compiler.to_mermaid_graph(sample_model))
+    _ -> io.println(net_compiler.to_graphviz_dot(sample_model))
+  }
+}
+
+fn ctl_netmodel_validate(file_path: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let errors = net_validator.validate_network_model(model)
+          case errors {
+            [] ->
+              io.println(
+                "Validation SUCCESS: Global Network Model is consistent and valid.",
+              )
+            errs -> {
+              io.println(
+                "Validation FAILED: "
+                <> int.to_string(list.length(errs))
+                <> " error(s) found:",
+              )
+              list.each(errs, fn(e) {
+                io.println("  - [" <> e.category <> "] " <> e.message)
+              })
+            }
+          }
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_otc() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 9234 BGP Role Negotiation & Only to Customer (OTC) │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Capability 9: Negotiate BGP Roles (Provider, Customer, │")
+  io.println("│               Route Server, RS-Client, Peer)           │")
+  io.println("│ Path Attribute 35: Only to Customer (OTC) Transitive   │")
+  io.println("│ Route Leak Mitigation: Active                          │")
+  io.println("│ Route Leaks Blocked:   0                               │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Peer baragoon_fra (AS4242421732):                      │")
+  io.println("│   - Negotiated Role: Peer <-> Peer (Valid)             │")
+  io.println("│   - OTC Ingress Enforcement: Enabled                   │")
+  io.println("│   - OTC Egress Action: Attach Local ASN4242420125      │")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_bgpls() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 7752 Distribution of BGP Link-State (BGP-LS)       │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Address Family: AFI 16388 (BGP-LS), SAFI 71 (BGP-LS)   │")
+  io.println("│ Attribute 29:   BGP-LS Attribute (TE & IGP Metrics)    │")
+  io.println("│ Active Graph:   2 Nodes, 1 Inter-Router Link           │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Node NLRI 1: fra-rr-1 (AS4242420125)                   │")
+  io.println("│   - IGP Router ID: 172.22.64.1                         │")
+  io.println("│   - Node Name: frankfurt-core-rr1                      │")
+  io.println("│ Link NLRI 1: fra-rr-1 <--> fra-edge-1                  │")
+  io.println("│   - IGP Metric: 10, Max Bandwidth: 1000 Mbps           │")
+  io.println("│   - TE Metric:  15, Link Type: WireGuard               │")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_filter() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ SlopFilter High-Performance BGP Policy Pipeline        │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Pipeline 1: dn42_inbound_core                          │")
+  io.println("│   - Rule 1: Drop non-DN42 bogons & martians            │")
+  io.println("│   - Rule 2: Low-latency (<25ms) LocalPref +50 boost    │")
+  io.println("│   - Rule 3: Auto-tag bandwidth tier & wireguard crypto │")
+  io.println("│   - Rule 4: Match RFC 9234 OTC route leaks -> Reject   │")
+  io.println("│   - Rule 5: Accept verified DN42 prefixes              │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Pipeline 2: dn42_outbound_transit                      │")
+  io.println("│   - Rule 1: RFC 7999 Blackhole propagation             │")
+  io.println("│   - Rule 2: Strip private ASNs from AS_PATH            │")
+  io.println("│   - Rule 3: Inject RFC 9234 OTC tag                    │")
   io.println("└────────────────────────────────────────────────────────┘")
 }

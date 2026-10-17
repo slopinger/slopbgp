@@ -181,6 +181,7 @@ pub type PeerConfig {
     route_server_client: Bool,
     route_reflector_client: Bool,
     confederation_member: Bool,
+    bgp_role: Option(BgpRole),
   )
 }
 

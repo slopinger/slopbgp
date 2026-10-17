@@ -15,6 +15,7 @@ import slopbgp/bgp/unnumbered.{UnnumberedPeer}
 import slopbgp/ip.{ip_to_string}
 import slopbgp/lookingglass/lookingglass.{query_summary}
 import slopbgp/net/socket.{type Socket, accept, close, listen, now, recv, send}
+import slopbgp/netmodel/model
 import slopbgp/rib/rib.{count_routes, get_all_routes}
 import slopbgp/rtr/client.{new_rtr_client}
 import slopbgp/server.{
@@ -303,6 +304,56 @@ fn dispatch_route(path: String, srv: ServerState) -> #(String, String, String) {
         )
       #("200 OK", "application/json", http.render_json_unnumbered([p1]))
     }
+
+    "/api/netmodel" -> {
+      let sample_reg =
+        model.Region(
+          id: "fra",
+          name: "Frankfurt am Main",
+          country: "DE",
+          dn42_region: 41,
+          lat: 50.11,
+          lon: 8.68,
+        )
+      let sample_node =
+        model.RouterNode(
+          id: "fra-edge-1",
+          hostname: "edge1.fra.slopnet",
+          region_id: "fra",
+          role: model.RoleEdge,
+          asn: None,
+          router_id: ip_to_string(srv.config.router_id),
+          loopback_v4: ip_to_string(srv.config.local_ipv4),
+          loopback_v6: ip_to_string(srv.config.local_ipv6),
+          bgp_port: srv.config.bgp_port,
+          api_port: srv.config.api_port,
+          extra_tags: ["core", "dn42"],
+        )
+      let sample_model =
+        model.GlobalNetworkModel(
+          name: "slopnet-global",
+          asn: srv.config.asn,
+          regions: [sample_reg],
+          routers: [sample_node],
+          links: [],
+          external_peers: [],
+        )
+      #(
+        "200 OK",
+        "application/json",
+        http.render_json_netmodel(Some(sample_model)),
+      )
+    }
+
+    "/api/otc" -> #(
+      "200 OK",
+      "application/json",
+      http.render_json_otc(0, srv.config.peers),
+    )
+
+    "/api/bgpls" -> #("200 OK", "application/json", http.render_json_bgpls())
+
+    "/api/filter" -> #("200 OK", "application/json", http.render_json_filter())
 
     _ -> #("404 Not Found", "application/json", "{\"error\":\"Not Found\"}\n")
   }

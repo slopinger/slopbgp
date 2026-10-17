@@ -170,6 +170,7 @@ pub fn parse_config_json(json_str: String) -> Result(DaemonConfig, String) {
               route_server_client: False,
               route_reflector_client: False,
               confederation_member: False,
+              bgp_role: None,
             ))
           }),
         )

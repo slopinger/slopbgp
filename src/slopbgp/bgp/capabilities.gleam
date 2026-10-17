@@ -53,8 +53,8 @@ pub fn role_to_int(role: BgpRole) -> Int {
     RoleProvider -> 0
     RoleRouteServer -> 1
     RoleRouteServerClient -> 2
-    RolePeer -> 3
-    RoleCustomer -> 4
+    RoleCustomer -> 3
+    RolePeer -> 4
     RoleUnknown(code) -> code
   }
 }
@@ -64,8 +64,8 @@ pub fn int_to_role(code: Int) -> BgpRole {
     0 -> RoleProvider
     1 -> RoleRouteServer
     2 -> RoleRouteServerClient
-    3 -> RolePeer
-    4 -> RoleCustomer
+    3 -> RoleCustomer
+    4 -> RolePeer
     _ -> RoleUnknown(code)
   }
 }

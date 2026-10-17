@@ -7,6 +7,7 @@ import slopbgp/api/http
 import slopbgp/bfd/message as bfd_msg
 import slopbgp/bfd/session as bfd_session
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
+import slopbgp/bgp/bgpls
 import slopbgp/bgp/blackhole
 import slopbgp/bgp/capabilities.{decode_capabilities, encode_capability}
 import slopbgp/bgp/confederation
@@ -28,6 +29,7 @@ import slopbgp/bgp/l3vpn
 import slopbgp/bgp/message.{decode_message, encode_message}
 import slopbgp/bgp/prefix_sid
 import slopbgp/bgp/rfc8212
+import slopbgp/bgp/rfc9234
 import slopbgp/bgp/routereflector
 import slopbgp/bgp/shutdown_communication.{
   decode_shutdown_communication, encode_shutdown_communication,
@@ -38,12 +40,16 @@ import slopbgp/bmp/message as bmp_message
 import slopbgp/config
 import slopbgp/dn42/filter.{is_bogon, is_valid_dn42_network}
 import slopbgp/dn42/roa.{parse_roa_line, validate_route}
+import slopbgp/filter/pipeline as slop_pipeline
 import slopbgp/ip.{
   decode_prefixes_ipv4, encode_prefix, ip_to_string, is_prefix_contained,
   parse_ip, parse_prefix, prefix_to_string,
 }
 import slopbgp/lookingglass/lookingglass as lg
 import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
+import slopbgp/netmodel/compiler as net_compiler
+import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/validator as net_validator
 import slopbgp/policy/filter as policy_filter
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/routeserver/routeserver
@@ -63,8 +69,9 @@ import slopbgp/types.{
   FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix, FlowspecRule,
   IpPrefix, Ipv4, Ipv6, LargeCommunity, MatchAsPathContains, MsgKeepalive,
   MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain,
-  PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, Route,
-  SafiUnicast, StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
+  PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, RolePeer,
+  RoleProvider, RoleRouteServer, RoleRouteServerClient, Route, SafiUnicast,
+  StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
 }
 import slopbgp/vrf/vrf
 
@@ -852,6 +859,7 @@ pub fn routeserver_api_and_dynamic_reload_test() {
       route_server_client: True,
       route_reflector_client: False,
       confederation_member: False,
+      bgp_role: None,
     )
 
   // 1. Test render_json_routeserver
@@ -1197,6 +1205,7 @@ pub fn topology_and_rest_endpoints_test() {
       route_server_client: False,
       route_reflector_client: True,
       confederation_member: False,
+      bgp_role: None,
     )
   let rr_json =
     http.render_json_routereflector(Some(Ipv4(172, 20, 10, 1)), [rr_peer])
@@ -1935,4 +1944,431 @@ pub fn unnumbered_rfc5549_test() {
   string.contains(json_peers, "dn42-peer-klaus") |> should.equal(True)
   string.contains(json_peers, "4242421234") |> should.equal(True)
   string.contains(json_peers, "ESTABLISHED") |> should.equal(True)
+}
+
+// 34. RFC 9234 BGP Role Negotiation and Only to Customer (OTC) Route Leak Prevention Tests
+pub fn rfc9234_role_and_otc_leak_test() {
+  // 1. Role pair compatibility validation
+  rfc9234.validate_role_pair(RoleProvider, RoleCustomer)
+  |> should.equal(Ok(Nil))
+  rfc9234.validate_role_pair(RoleCustomer, RoleProvider)
+  |> should.equal(Ok(Nil))
+  rfc9234.validate_role_pair(RoleRouteServer, RoleRouteServerClient)
+  |> should.equal(Ok(Nil))
+  rfc9234.validate_role_pair(RoleRouteServerClient, RoleRouteServer)
+  |> should.equal(Ok(Nil))
+  rfc9234.validate_role_pair(RolePeer, RolePeer) |> should.equal(Ok(Nil))
+
+  // Invalid role pairings should result in error
+  let invalid_res1 = rfc9234.validate_role_pair(RoleProvider, RoleProvider)
+  case invalid_res1 {
+    Error(msg) -> string.contains(msg, "Role mismatch") |> should.equal(True)
+    Ok(_) -> panic as "Provider <-> Provider should fail"
+  }
+  let invalid_res2 = rfc9234.validate_role_pair(RoleCustomer, RoleCustomer)
+  case invalid_res2 {
+    Error(msg) -> string.contains(msg, "Role mismatch") |> should.equal(True)
+    Ok(_) -> panic as "Customer <-> Customer should fail"
+  }
+
+  // 2. Inbound route leak detection
+  let test_route =
+    Route(
+      prefix: IpPrefix(Ipv4(172, 22, 100, 0), 24),
+      next_hop: Ipv4(172, 22, 64, 1),
+      as_path: [AsSequence([4_242_421_111])],
+      origin: OriginIgp,
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      originator_id: None,
+      cluster_list: [],
+      peer_id: "peer_de_fra",
+      timestamp: 1000,
+      path_id: None,
+      roa_status: RoaValid,
+      otc: Some(4_242_429_999),
+    )
+
+  // Received from a lateral Peer where ingress AS (4242421111) != OTC AS (4242429999) -> LEAK!
+  let leak_eval =
+    rfc9234.evaluate_inbound_otc(test_route, 4_242_421_111, RolePeer)
+  case leak_eval {
+    Error(err) ->
+      string.contains(err, "route leak detected") |> should.equal(True)
+    Ok(_) -> panic as "Should detect route leak"
+  }
+
+  // Received from a lateral Peer where ingress AS matches OTC AS -> Valid
+  let matching_route = Route(..test_route, otc: Some(4_242_421_111))
+  rfc9234.evaluate_inbound_otc(matching_route, 4_242_421_111, RolePeer)
+  |> should.equal(Ok(matching_route))
+
+  // Received from Provider without OTC -> Provider OTC is attached
+  let no_otc_route = Route(..test_route, otc: None)
+  let prov_eval =
+    rfc9234.evaluate_inbound_otc(no_otc_route, 4_242_420_001, RoleProvider)
+  let assert Ok(tagged_route) = prov_eval
+  tagged_route.otc |> should.equal(Some(4_242_420_001))
+
+  // 3. Outbound route leak prevention
+  // Advertising to Customer without OTC -> attaches local AS
+  let out_eval =
+    rfc9234.evaluate_outbound_otc(no_otc_route, 4_242_420_125, RoleCustomer)
+  out_eval.otc |> should.equal(Some(4_242_420_125))
+
+  // Advertising to Customer with existing OTC -> preserved
+  let out_preserved =
+    rfc9234.evaluate_outbound_otc(test_route, 4_242_420_125, RoleCustomer)
+  out_preserved.otc |> should.equal(Some(4_242_429_999))
+}
+
+// 35. RFC 7752 BGP Link-State (BGP-LS) Tests
+pub fn bgp_ls_rfc7752_test() {
+  // 1. Node Descriptor roundtrip
+  let node_desc =
+    bgpls.BgpLsNodeDescriptor(
+      asn: 4_242_420_125,
+      ls_id: 1,
+      igp_router_id: "fra-edge-01",
+    )
+  let node_bin = bgpls.encode_node_descriptor(node_desc)
+  let assert Ok(dec_node) = bgpls.decode_node_descriptor(node_bin)
+  dec_node.asn |> should.equal(4_242_420_125)
+  dec_node.ls_id |> should.equal(1)
+  dec_node.igp_router_id |> should.equal("fra-edge-01")
+
+  // 2. Link Descriptor roundtrip
+  let link_desc =
+    bgpls.BgpLsLinkDescriptor(
+      local_id: 10,
+      remote_id: 20,
+      local_ip: Some(Ipv4(172, 22, 64, 1)),
+      remote_ip: Some(Ipv4(172, 22, 64, 2)),
+    )
+  let link_bin = bgpls.encode_link_descriptor(link_desc)
+  let dec_link = bgpls.decode_link_descriptor(link_bin)
+  dec_link.local_id |> should.equal(10)
+  dec_link.remote_id |> should.equal(20)
+  dec_link.local_ip |> should.equal(Some(Ipv4(172, 22, 64, 1)))
+  dec_link.remote_ip |> should.equal(Some(Ipv4(172, 22, 64, 2)))
+
+  // 3. Node NLRI roundtrip
+  let node_nlri =
+    bgpls.LsNodeNlri(protocol_id: 7, identifier: 42, node: node_desc)
+  let nlri_bin = bgpls.encode_bgp_ls_nlri(node_nlri)
+  let assert Ok(dec_nlri) = bgpls.decode_bgp_ls_nlri(nlri_bin)
+  case dec_nlri {
+    bgpls.LsNodeNlri(proto, id, n) -> {
+      proto |> should.equal(7)
+      id |> should.equal(42)
+      n.igp_router_id |> should.equal("fra-edge-01")
+    }
+    _ -> panic as "Expected LsNodeNlri"
+  }
+
+  // 4. BGP-LS Attributes roundtrip
+  let ls_attrs =
+    bgpls.BgpLsAttributes(
+      node_name: Some("frankfurt-core-router"),
+      igp_metric: Some(15),
+      te_metric: Some(25),
+      max_bandwidth_bytes: Some(125_000_000.0),
+      admin_group: Some(0x00000001),
+    )
+  let attr_bin = bgpls.encode_bgp_ls_attributes(ls_attrs)
+  let dec_attrs = bgpls.decode_bgp_ls_attributes(attr_bin)
+  dec_attrs.node_name |> should.equal(Some("frankfurt-core-router"))
+  dec_attrs.igp_metric |> should.equal(Some(15))
+  dec_attrs.te_metric |> should.equal(Some(25))
+  dec_attrs.admin_group |> should.equal(Some(0x00000001))
+}
+
+// 36. SlopFilter Expressive BGP Routing Policy Pipeline Tests
+pub fn slopfilter_pipeline_test() {
+  let base_route =
+    Route(
+      prefix: IpPrefix(Ipv4(172, 22, 64, 0), 27),
+      next_hop: Ipv4(172, 22, 64, 1),
+      as_path: [AsSequence([4_242_421_732])],
+      origin: OriginIgp,
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [Community(asn: 64_511, value: 1015)],
+      large_communities: [LargeCommunity(4_242_420_125, 1, 10)],
+      ext_communities: [],
+      originator_id: None,
+      cluster_list: [],
+      peer_id: "baragoon_fra",
+      timestamp: 12_345,
+      path_id: None,
+      roa_status: RoaValid,
+      otc: None,
+    )
+
+  // 1. Condition Matching Tests
+  // Prefix exact vs longer
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchPrefix(
+      IpPrefix(Ipv4(172, 22, 64, 0), 27),
+      slop_pipeline.PrefixExact,
+    ),
+  )
+  |> should.equal(True)
+
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchPrefix(
+      IpPrefix(Ipv4(172, 22, 0, 0), 16),
+      slop_pipeline.PrefixLonger,
+    ),
+  )
+  |> should.equal(True)
+
+  // AS-Path regex
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchAsPathRegex("^4242421732$"),
+  )
+  |> should.equal(True)
+
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchAsPathRegex("_9999_"),
+  )
+  |> should.equal(False)
+
+  // DN42 latency matching
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchDn42Latency(20),
+  )
+  |> should.equal(True)
+
+  slop_pipeline.matches_condition(
+    base_route,
+    slop_pipeline.MatchDn42Latency(10),
+  )
+  |> should.equal(False)
+
+  // 2. Full Multi-Stage Policy Pipeline Execution
+  let pipeline =
+    slop_pipeline.FilterPipeline(
+      name: "dn42_inbound_core",
+      rules: [
+        // Rule 1: Drop bogons
+        slop_pipeline.FilterRule(
+          name: "drop_bogons",
+          matches: [slop_pipeline.MatchDn42Bogon],
+          actions: [slop_pipeline.ActionReject("Bogon or Non-DN42 route")],
+        ),
+        // Rule 2: Low-latency fast path bonus
+        slop_pipeline.FilterRule(
+          name: "low_latency_boost",
+          matches: [slop_pipeline.MatchDn42Latency(25)],
+          actions: [
+            slop_pipeline.ActionAddLocalPref(50),
+            slop_pipeline.ActionDn42TagBandwidth(1000),
+            slop_pipeline.ActionDn42TagCrypto(41),
+            slop_pipeline.ActionNextRule,
+          ],
+        ),
+        // Rule 3: Final acceptance
+        slop_pipeline.FilterRule(
+          name: "accept_dn42",
+          matches: [slop_pipeline.MatchAny],
+          actions: [slop_pipeline.ActionAccept],
+        ),
+      ],
+      default_action: slop_pipeline.ActionReject("Default drop"),
+    )
+
+  let result = slop_pipeline.execute_pipeline(pipeline, base_route)
+  result.accepted |> should.equal(True)
+  result.route.local_pref |> should.equal(150)
+  result.applied_rules
+  |> should.equal(["low_latency_boost", "accept_dn42"])
+
+  // Check bandwidth and crypto communities were added
+  let has_bw =
+    list.any(result.route.communities, fn(c) {
+      c.asn == 64_511 && c.value == 28
+    })
+  has_bw |> should.equal(True)
+
+  let has_crypto =
+    list.any(result.route.communities, fn(c) {
+      c.asn == 64_511 && c.value == 41
+    })
+  has_crypto |> should.equal(True)
+
+  // Test Blackhole action
+  let bh_pipeline =
+    slop_pipeline.FilterPipeline(
+      name: "mitigation",
+      rules: [
+        slop_pipeline.FilterRule(
+          name: "blackhole_ddos",
+          matches: [slop_pipeline.MatchAny],
+          actions: [slop_pipeline.ActionBlackhole, slop_pipeline.ActionAccept],
+        ),
+      ],
+      default_action: slop_pipeline.ActionReject("drop"),
+    )
+  let bh_result = slop_pipeline.execute_pipeline(bh_pipeline, base_route)
+  let has_bh_comm =
+    list.any(bh_result.route.communities, fn(c) {
+      c.asn == 65_535 && c.value == 666
+    })
+  has_bh_comm |> should.equal(True)
+}
+
+// 37. Unified Global Network Model Decoding, Validation, and Router Config Derivation Tests
+pub fn global_network_model_compiler_test() {
+  let model_json =
+    "{\n"
+    <> "  \"name\": \"slopnet-global\",\n"
+    <> "  \"asn\": 4242420125,\n"
+    <> "  \"regions\": [\n"
+    <> "    {\"id\": \"fra\", \"name\": \"Frankfurt\", \"country\": \"DE\", \"dn42_region\": 41, \"lat\": 50.11, \"lon\": 8.68},\n"
+    <> "    {\"id\": \"ams\", \"name\": \"Amsterdam\", \"country\": \"NL\", \"dn42_region\": 42, \"lat\": 52.37, \"lon\": 4.89}\n"
+    <> "  ],\n"
+    <> "  \"routers\": [\n"
+    <> "    {\n"
+    <> "      \"id\": \"fra-rr-1\",\n"
+    <> "      \"hostname\": \"rr1.fra.slopnet\",\n"
+    <> "      \"region_id\": \"fra\",\n"
+    <> "      \"role\": \"route_reflector\",\n"
+    <> "      \"router_id\": \"172.22.64.1\",\n"
+    <> "      \"loopback_v4\": \"172.22.64.1\",\n"
+    <> "      \"loopback_v6\": \"fdd4:af47:dcfa::1\",\n"
+    <> "      \"bgp_port\": 179,\n"
+    <> "      \"api_port\": 9179\n"
+    <> "    },\n"
+    <> "    {\n"
+    <> "      \"id\": \"fra-edge-1\",\n"
+    <> "      \"hostname\": \"edge1.fra.slopnet\",\n"
+    <> "      \"region_id\": \"fra\",\n"
+    <> "      \"role\": \"edge\",\n"
+    <> "      \"router_id\": \"172.22.64.2\",\n"
+    <> "      \"loopback_v4\": \"172.22.64.2\",\n"
+    <> "      \"loopback_v6\": \"fdd4:af47:dcfa::2\",\n"
+    <> "      \"bgp_port\": 179,\n"
+    <> "      \"api_port\": 9179\n"
+    <> "    }\n"
+    <> "  ],\n"
+    <> "  \"links\": [\n"
+    <> "    {\n"
+    <> "      \"id\": \"link-fra-core\",\n"
+    <> "      \"endpoint_a\": \"fra-rr-1\",\n"
+    <> "      \"endpoint_b\": \"fra-edge-1\",\n"
+    <> "      \"link_type\": \"wireguard\",\n"
+    <> "      \"cost\": 10,\n"
+    <> "      \"latency_ms\": 2,\n"
+    <> "      \"bandwidth_mbps\": 1000,\n"
+    <> "      \"bfd\": true,\n"
+    <> "      \"ip_a\": \"172.22.64.10\",\n"
+    <> "      \"ip_b\": \"172.22.64.11\"\n"
+    <> "    }\n"
+    <> "  ],\n"
+    <> "  \"external_peers\": [\n"
+    <> "    {\n"
+    <> "      \"id\": \"peer-baragoon\",\n"
+    <> "      \"name\": \"Baragoon Frankfurt\",\n"
+    <> "      \"attached_router\": \"fra-edge-1\",\n"
+    <> "      \"remote_as\": 4242421732,\n"
+    <> "      \"remote_ip\": \"172.22.64.120\",\n"
+    <> "      \"bgp_role\": \"peer\",\n"
+    <> "      \"bfd\": true,\n"
+    <> "      \"dn42_latency\": 8,\n"
+    <> "      \"dn42_bandwidth\": 1000\n"
+    <> "    }\n"
+    <> "  ]\n"
+    <> "}"
+
+  // 1. JSON decoding
+  let assert Ok(model) = net_model.decode_network_model(model_json)
+  model.name |> should.equal("slopnet-global")
+  model.asn |> should.equal(4_242_420_125)
+  list.length(model.regions) |> should.equal(2)
+  list.length(model.routers) |> should.equal(2)
+  list.length(model.links) |> should.equal(1)
+  list.length(model.external_peers) |> should.equal(1)
+
+  // 2. Topology validation (valid model has 0 errors)
+  let errors = net_validator.validate_network_model(model)
+  list.length(errors) |> should.equal(0)
+
+  // Test validation detects errors when router references invalid region
+  let broken_router =
+    net_model.RouterNode(
+      id: "broken-1",
+      hostname: "broken.net",
+      region_id: "unknown-pop",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.22.64.99",
+      loopback_v4: "172.22.64.99",
+      loopback_v6: "fdd4::99",
+      bgp_port: 179,
+      api_port: 9179,
+      extra_tags: [],
+    )
+  let broken_model =
+    net_model.GlobalNetworkModel(..model, routers: [
+      broken_router,
+      ..model.routers
+    ])
+  let broken_errors = net_validator.validate_network_model(broken_model)
+  list.length(broken_errors) |> should.equal(1)
+
+  // 3. Compiler derives edge router config
+  let assert Ok(edge_cfg) =
+    net_compiler.compile_router_config(model, "fra-edge-1")
+  edge_cfg.asn |> should.equal(4_242_420_125)
+  edge_cfg.router_id |> should.equal(Ipv4(172, 22, 64, 2))
+  edge_cfg.cluster_id |> should.equal(None)
+  // Should have 2 peers: 1 iBGP link to fra-rr-1 and 1 external peer to baragoon
+  list.length(edge_cfg.peers) |> should.equal(2)
+
+  let assert Ok(ibgp_peer) =
+    list.find(edge_cfg.peers, fn(p) { p.id == "ibgp_fra-rr-1" })
+  ibgp_peer.remote_as |> should.equal(4_242_420_125)
+  ibgp_peer.dn42_latency |> should.equal(Some(2))
+  ibgp_peer.dn42_bandwidth |> should.equal(Some(1000))
+  ibgp_peer.dn42_crypto |> should.equal(Some(41))
+
+  let assert Ok(ext_peer) =
+    list.find(edge_cfg.peers, fn(p) { p.id == "peer-baragoon" })
+  ext_peer.remote_as |> should.equal(4_242_421_732)
+  ext_peer.bgp_role |> should.equal(Some(RolePeer))
+
+  // 4. Compiler derives Route Reflector config
+  let assert Ok(rr_cfg) = net_compiler.compile_router_config(model, "fra-rr-1")
+  rr_cfg.cluster_id |> should.equal(Some(Ipv4(172, 22, 64, 1)))
+  let assert Ok(rr_client_peer) =
+    list.find(rr_cfg.peers, fn(p) { p.id == "ibgp_fra-edge-1" })
+  rr_client_peer.route_reflector_client |> should.equal(True)
+
+  // 5. Native JSON config generation
+  let edge_json = net_compiler.daemon_config_to_json(edge_cfg)
+  string.contains(edge_json, "172.22.64.2") |> should.equal(True)
+  string.contains(edge_json, "ibgp_fra-rr-1") |> should.equal(True)
+  string.contains(edge_json, "peer-baragoon") |> should.equal(True)
+
+  // 6. Graphviz DOT and Mermaid topology graph generation
+  let dot = net_compiler.to_graphviz_dot(model)
+  string.contains(dot, "graph \"slopnet-global\"") |> should.equal(True)
+  string.contains(dot, "subgraph \"cluster_fra\"") |> should.equal(True)
+
+  let mermaid = net_compiler.to_mermaid_graph(model)
+  string.contains(mermaid, "flowchart LR") |> should.equal(True)
+  string.contains(mermaid, "subgraph fra") |> should.equal(True)
+  string.contains(mermaid, "fra-rr-1 <-->|2ms| fra-edge-1")
+  |> should.equal(True)
 }

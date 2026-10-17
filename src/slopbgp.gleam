@@ -60,7 +60,11 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["lookingglass", ..]
     | ["vrf", ..]
     | ["sr", ..]
-    | ["unnumbered", ..] -> run_ctl(args)
+    | ["unnumbered", ..]
+    | ["netmodel", ..]
+    | ["otc", ..]
+    | ["bgpls", ..]
+    | ["filter", ..] -> run_ctl(args)
     ["daemon", ..] | [] -> run_daemon()
     _ -> {
       io.println(

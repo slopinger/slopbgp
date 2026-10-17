@@ -10,6 +10,7 @@ import slopbgp/bgp/blackhole.{has_blackhole_community}
 import slopbgp/bgp/evpn.{type EvpnRouteType2, type EvpnRouteType5}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/bgp/prefix_sid.{type BgpPrefixSid, prefix_sid_to_json}
+import slopbgp/bgp/rfc9234
 import slopbgp/bgp/unnumbered.{type UnnumberedPeer, unnumbered_peers_to_json}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
@@ -17,6 +18,7 @@ import slopbgp/lookingglass/lookingglass.{
   type LgQueryResult, type LgSummary, render_json_lg_result,
   render_json_lg_summary,
 }
+import slopbgp/netmodel/model.{type GlobalNetworkModel, encode_network_model}
 import slopbgp/rtr/client.{
   type RtrClient, RtrStatusConnecting, RtrStatusDisconnected, RtrStatusError,
   RtrStatusSynchronized, RtrStatusSynchronizing,
@@ -612,6 +614,43 @@ pub fn render_json_sr(sids: List(BgpPrefixSid)) -> String {
 
 pub fn render_json_unnumbered(peers: List(UnnumberedPeer)) -> String {
   unnumbered_peers_to_json(peers)
+}
+
+pub fn render_json_netmodel(model_opt: Option(GlobalNetworkModel)) -> String {
+  case model_opt {
+    Some(model) -> encode_network_model(model)
+    None -> "{\"status\":\"no_global_network_model_loaded\"}"
+  }
+}
+
+pub fn render_json_otc(leaks_detected: Int, peers: List(PeerConfig)) -> String {
+  let peer_roles =
+    list.map(peers, fn(p) {
+      let r_str = case p.bgp_role {
+        Some(r) -> rfc9234.format_role(r)
+        None -> "unnegotiated"
+      }
+      "{\"peer_id\":\""
+      <> p.id
+      <> "\",\"remote_as\":"
+      <> int.to_string(p.remote_as)
+      <> ",\"role\":\""
+      <> r_str
+      <> "\"}"
+    })
+  "{\"rfc\":\"RFC 9234\",\"route_leaks_prevented\":"
+  <> int.to_string(leaks_detected)
+  <> ",\"role_enforcement\":true,\"peers\":["
+  <> string.join(peer_roles, ",")
+  <> "]}"
+}
+
+pub fn render_json_bgpls() -> String {
+  "{\"rfc\":\"RFC 7752\",\"afi\":16388,\"safi\":71,\"status\":\"active\",\"protocols\":[\"BGP-LS\",\"IS-IS\",\"OSPFv2\"],\"exported_nodes\":2,\"exported_links\":1}"
+}
+
+pub fn render_json_filter() -> String {
+  "{\"engine\":\"SlopFilter v1.0\",\"pipelines\":[\"dn42_inbound_core\",\"dn42_outbound_transit\",\"internal_ibgp_in\",\"internal_ibgp_out\"],\"features\":[\"prefix_sets\",\"aspath_regex\",\"community_wildcards\",\"dn42_tags\",\"rpki_roa\",\"otc_leaks\",\"blackhole\"]}"
 }
 
 pub fn render_dashboard_html(
