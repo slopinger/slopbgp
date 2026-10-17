@@ -62,8 +62,9 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 5549 / 8950** | BGP Unnumbered (IPv6 Link-Local Peering with Extended Next-Hop & Linux inet6 kernel routing) | Full |
 | **RFC 7752** | Distribution of BGP Link-State (BGP-LS: Node NLRIs, Link NLRIs & Attribute 29 TLVs) | Full |
 | **RFC 7938 / 7454** | BGP Route Hygiene & Security (Martian ASNs, RFC 6890 Bogons, Path Bounds & Prepending Limits) | Full |
-| **RFC 9319** | Autonomous System Provider Authorization (ASPA BGP Path Verification & Valley-Free Routing) | Full |
 | **RFC 8538** | BGP Long-Lived Graceful Restart (LLGR Capability 71, LLGR_STALE & NO_LLGR Communities) | Full |
+| **RFC 7938** | Use of BGP for Routing in Large-Scale Data Centers (Equal-Cost Multi-Path ECMP & UCMP Weighted Bandwidth) | Full |
+| **RFC 8205** | BGPsec Path Signatures & AS-Path Cryptographic Security (ECDSA P-256 Signatures & Target AS Chaining) | Full |
 
 ---
 
@@ -288,6 +289,16 @@ slopbgpctl bgpls
 # Preview GitOps fleet provisioning plan across all network routers
 slopbgpctl netmodel plan examples/slopnet_global.json
 
+# Detect GitOps fleet configuration drift against global network model
+slopbgpctl netmodel drift examples/slopnet_global.json
+
+# Inspect RFC 7938 ECMP & UCMP multipath FIB resolution
+slopbgpctl ecmp
+
+# Verify RFC 8205 BGPsec AS-Path cryptographic signatures
+slopbgpctl bgpsec
+slopbgpctl bgpsec verify 4242421732 4242420987 4242420125
+
 # Step-by-step route policy trace & dry-run evaluation
 slopbgpctl filter test 172.20.10.0/24 4242421732 64511:1
 
@@ -343,7 +354,7 @@ nix develop
 ### With Gleam
 
 ```bash
-# Run unit and integration test suite
+# Run unit and integration test suite (51 test suites passing)
 gleam test
 
 # Format code

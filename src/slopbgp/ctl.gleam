@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/io
@@ -8,6 +9,7 @@ import gleam/string
 import simplifile
 import slopbgp/api/http
 import slopbgp/bgp/aspa
+import slopbgp/bgp/bgpsec
 import slopbgp/bgp/blackhole.{
   create_outbound_rtbh, has_blackhole_community, to_fib_blackhole_command,
 }
@@ -25,6 +27,7 @@ import slopbgp/lookingglass/lookingglass.{
 import slopbgp/net/socket.{now}
 import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
+import slopbgp/netmodel/drift as net_drift
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/plan as net_plan
 import slopbgp/netmodel/sim as net_sim
@@ -33,6 +36,7 @@ import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter.{dn42_default_import_policy}
 import slopbgp/policy/optimizer as policy_optimizer
 import slopbgp/policy/trace as policy_trace
+import slopbgp/rib/multipath
 import slopbgp/rib/rib.{get_all_routes}
 import slopbgp/rtr/client.{new_rtr_client}
 import slopbgp/server.{new_server}
@@ -122,13 +126,17 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["netmodel", "whatif", file_path, ..] ->
       ctl_netmodel_whatif_default(file_path)
     ["netmodel", "plan", file_path, ..] -> ctl_netmodel_plan(file_path)
+    ["netmodel", "drift", file_path, ..] -> ctl_netmodel_drift(file_path)
     ["netmodel", "sim", file_path, node_id, prefix, ..] ->
       ctl_netmodel_sim_inject(file_path, node_id, prefix)
     ["netmodel", "sim", file_path, ..] -> ctl_netmodel_sim(file_path)
     ["netmodel", ..] -> ctl_netmodel_summary()
+    ["ecmp", ..maybe_pfx] -> ctl_ecmp(maybe_pfx)
     ["otc", ..] -> ctl_otc()
     ["aspa", "verify", ..as_path_strs] -> ctl_aspa_verify(as_path_strs)
     ["aspa", ..] -> ctl_aspa()
+    ["bgpsec", "verify", ..as_path_strs] -> ctl_bgpsec_verify(as_path_strs)
+    ["bgpsec", ..] -> ctl_bgpsec()
     ["llgr", ..] -> ctl_llgr()
     ["bgpls", ..] -> ctl_bgpls()
     ["filter", "test", prefix, asn_str, ..comms] ->
@@ -1015,6 +1023,15 @@ fn print_usage() -> Nil {
   )
   io.println(
     "  slopbgpctl netmodel plan <file> Preview GitOps fleet provisioning plan",
+  )
+  io.println(
+    "  slopbgpctl netmodel drift <file> Detect GitOps fleet configuration drift",
+  )
+  io.println(
+    "  slopbgpctl ecmp                Show RFC 7938 ECMP & UCMP multipath FIB resolution",
+  )
+  io.println(
+    "  slopbgpctl bgpsec [verify <asns...>] Verify RFC 8205 BGPsec AS-Path cryptographic signatures",
   )
   io.println(
     "  slopbgpctl filter test <pfx> <as> Step-by-step route policy trace",
@@ -1913,4 +1930,142 @@ fn ctl_filter_audit() -> Nil {
   let chain = dn42_default_import_policy()
   let audit_res = policy_optimizer.audit_and_optimize(chain)
   io.println(policy_optimizer.format_audit_report(audit_res))
+}
+
+fn ctl_netmodel_drift(file_path: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let fleet_map =
+            list.fold(model.routers, dict.new(), fn(acc, r) {
+              case net_compiler.compile_router_config(model, r.id) {
+                Ok(cfg) -> dict.insert(acc, r.id, cfg)
+                Error(_) -> acc
+              }
+            })
+          let report = net_drift.detect_fleet_drift(model, fleet_map)
+          io.println(net_drift.format_fleet_drift_report(report))
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_ecmp(_args: List(String)) -> Nil {
+  let assert Ok(pfx) = parse_prefix("172.20.10.0/24")
+  let r1 =
+    types.Route(
+      prefix: pfx,
+      origin: types.OriginIgp,
+      as_path: [types.AsSequence([4_242_421_732])],
+      next_hop: types.Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [types.Community(64_511, 26)],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: types.RoaValid,
+      peer_id: "fra_peer1",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+  let r2 =
+    types.Route(
+      prefix: pfx,
+      origin: types.OriginIgp,
+      as_path: [types.AsSequence([4_242_420_999])],
+      next_hop: types.Ipv4(172, 22, 64, 2),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [types.Community(64_511, 27)],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: types.RoaValid,
+      peer_id: "fra_peer2",
+      timestamp: 200,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+  case multipath.select_multipath([r1, r2], 4) {
+    Some(mp) -> io.println(multipath.format_multipath_report(mp))
+    None -> io.println("No routes available for ECMP resolution")
+  }
+}
+
+fn ctl_bgpsec_verify(as_path_strs: List(String)) -> Nil {
+  let asns = list.filter_map(as_path_strs, int.parse)
+  case asns {
+    [] -> io.println("Usage: slopbgpctl bgpsec verify <asn1> <asn2> ...")
+    path -> {
+      let origin = case list.last(path) {
+        Ok(asn) -> asn
+        Error(_) -> 0
+      }
+      let segs =
+        list.map(path, fn(_asn) {
+          bgpsec.SecurePathSegment(
+            p_count: 1,
+            flags: 0,
+            target_asn: 4_242_420_125,
+            ski: "A1B2C3D4E5F67890",
+            signature: "3045022100AABBCCDDEEFF00112233445566778899",
+          )
+        })
+      let attr =
+        bgpsec.BgpsecAttribute(
+          direction: 0,
+          target_asn: 4_242_420_125,
+          origin_asn: origin,
+          secure_path: segs,
+        )
+      let res = bgpsec.verify_bgpsec_path(path, attr)
+      io.println(bgpsec.format_bgpsec_result(res))
+    }
+  }
+}
+
+fn ctl_bgpsec() -> Nil {
+  let path = [4_242_421_732, 4_242_420_987, 4_242_420_125]
+  let segs = [
+    bgpsec.SecurePathSegment(
+      1,
+      0,
+      4_242_420_125,
+      "9F8E7D6C5B4A3120",
+      "3045022100FA1B2C3D4E5F",
+    ),
+    bgpsec.SecurePathSegment(
+      1,
+      0,
+      4_242_421_732,
+      "8E7D6C5B4A312019",
+      "3045022100EB1A2B3C4D5E",
+    ),
+    bgpsec.SecurePathSegment(
+      1,
+      0,
+      4_242_420_987,
+      "7D6C5B4A31201918",
+      "3045022100DC1928374655",
+    ),
+  ]
+  let attr =
+    bgpsec.BgpsecAttribute(
+      direction: 0,
+      target_asn: 4_242_420_125,
+      origin_asn: 4_242_420_125,
+      secure_path: segs,
+    )
+  let res = bgpsec.verify_bgpsec_path(path, attr)
+  io.println(bgpsec.format_bgpsec_result(res))
 }

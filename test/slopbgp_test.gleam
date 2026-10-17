@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -9,6 +10,7 @@ import slopbgp/bfd/session as bfd_session
 import slopbgp/bgp/aspa
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
 import slopbgp/bgp/bgpls
+import slopbgp/bgp/bgpsec
 import slopbgp/bgp/blackhole
 import slopbgp/bgp/capabilities.{decode_capabilities, encode_capability}
 import slopbgp/bgp/confederation
@@ -52,6 +54,7 @@ import slopbgp/lookingglass/lookingglass as lg
 import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
 import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
+import slopbgp/netmodel/drift as net_drift
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/plan as net_plan
 import slopbgp/netmodel/sim as net_sim
@@ -60,6 +63,7 @@ import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter as policy_filter
 import slopbgp/policy/optimizer as policy_optimizer
 import slopbgp/policy/trace as policy_trace
+import slopbgp/rib/multipath
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/routeserver/routeserver
 import slopbgp/rtr/client as rtr_client
@@ -3242,4 +3246,251 @@ pub fn netmodel_gitops_fleet_plan_test() {
 
   let json_rep = net_plan.fleet_plan_to_json(fleet_plan)
   string.contains(json_rep, "\"all_hot_reloadable\":true") |> should.equal(True)
+}
+
+// 49. RFC 7938 BGP Equal-Cost Multi-Path (ECMP) & Weighted ECMP (UCMP) Engine
+pub fn multipath_ecmp_ucmp_test() {
+  let assert Ok(pfx) = parse_prefix("172.20.10.0/24")
+  let r1 =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [Community(64_511, 26)],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "fra_peer1",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+  let r2 =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_420_999])],
+      next_hop: Ipv4(172, 22, 64, 2),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [Community(64_511, 27)],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "fra_peer2",
+      timestamp: 200,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  // Verify compatibility
+  multipath.is_ecmp_compatible(r1, r2) |> should.equal(True)
+
+  // Resolve multipath
+  let res = multipath.select_multipath([r1, r2], 4)
+  res |> should.be_some()
+  let assert Some(mp) = res
+
+  mp.is_ecmp |> should.equal(True)
+  mp.is_weighted |> should.equal(True)
+  list.length(mp.multipath_next_hops) |> should.equal(2)
+  mp.total_weight |> should.equal(150)
+
+  // Verify Linux iproute2 command generation
+  let cmd = multipath.format_iproute2_command(mp)
+  string.contains(cmd, "ip route replace 172.20.10.0/24") |> should.equal(True)
+  string.contains(cmd, "nexthop via 172.22.64.1 weight 50")
+  |> should.equal(True)
+  string.contains(cmd, "nexthop via 172.22.64.2 weight 100")
+  |> should.equal(True)
+
+  // CLI report & JSON export
+  let cli_rep = multipath.format_multipath_report(mp)
+  string.contains(cli_rep, "UCMP (Unequal-Cost Weighted Multi-Path)")
+  |> should.equal(True)
+
+  let json_rep = multipath.multipath_to_json(mp)
+  string.contains(json_rep, "\"is_ecmp\":true") |> should.equal(True)
+  string.contains(json_rep, "\"is_weighted\":true") |> should.equal(True)
+}
+
+// 50. GitOps Fleet Config Drift Detection & Automated Reconciliation Engine
+pub fn netmodel_gitops_drift_detection_test() {
+  let reg_eu = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let r_core =
+    net_model.RouterNode(
+      id: "fra-core1",
+      hostname: "fra-core1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "drift-test-net",
+      asn: 4_242_421_732,
+      regions: [reg_eu],
+      routers: [r_core],
+      links: [],
+      external_peers: [],
+    )
+
+  let assert Ok(desired) =
+    net_compiler.compile_router_config(model, "fra-core1")
+
+  // Baseline: in-sync live config matches desired
+  let in_sync_report =
+    net_drift.detect_node_drift(
+      desired,
+      desired,
+      "fra-core1",
+      "fra-core1.slopnet",
+    )
+  in_sync_report.severity |> should.equal(net_drift.DriftInSync)
+  list.length(in_sync_report.issues) |> should.equal(0)
+
+  // Drifted live config: rogue peer added
+  let rogue_peer =
+    PeerConfig(
+      id: "unmanaged_rogue_peer",
+      name: "Unauthorized Transit",
+      remote_as: 65_534,
+      remote_ip: Ipv4(10, 0, 0, 1),
+      local_as: 4_242_421_732,
+      local_ip: Ipv4(172, 20, 10, 1),
+      port: 179,
+      hold_time: 90,
+      keepalive_time: 30,
+      passive: False,
+      enable_ipv4: True,
+      enable_ipv6: False,
+      extended_next_hop: False,
+      add_path_rx: False,
+      add_path_tx: False,
+      dn42_latency: None,
+      dn42_bandwidth: None,
+      dn42_crypto: None,
+      dn42_region: None,
+      import_filters: [],
+      export_filters: [],
+      route_server_client: False,
+      route_reflector_client: False,
+      confederation_member: False,
+      bgp_role: None,
+    )
+
+  let drifted_live =
+    config.DaemonConfig(..desired, peers: [rogue_peer, ..desired.peers])
+
+  let drifted_report =
+    net_drift.detect_node_drift(
+      desired,
+      drifted_live,
+      "fra-core1",
+      "fra-core1.slopnet",
+    )
+  drifted_report.severity |> should.equal(net_drift.DriftCritical)
+  list.length(drifted_report.issues) |> should.equal(1)
+  list.length(drifted_report.reconciliation_actions) |> should.equal(1)
+
+  // Fleet drift test
+  let fleet_map = dict.from_list([#("fra-core1", drifted_live)])
+  let fleet_rep = net_drift.detect_fleet_drift(model, fleet_map)
+  fleet_rep.total_nodes |> should.equal(1)
+  fleet_rep.drifted_nodes |> should.equal(1)
+  fleet_rep.overall_severity |> should.equal(net_drift.DriftCritical)
+
+  // Formatting & script generation
+  let cli_rep = net_drift.format_fleet_drift_report(fleet_rep)
+  string.contains(cli_rep, "UNMANAGED_PEER: unmanaged_rogue_peer")
+  |> should.equal(True)
+
+  let script = net_drift.generate_reconciliation_script(fleet_rep)
+  string.contains(script, "slopbgpctl peer remove unmanaged_rogue_peer")
+  |> should.equal(True)
+
+  let json_rep = net_drift.fleet_drift_report_to_json(fleet_rep)
+  string.contains(json_rep, "\"critical_drift\"") |> should.equal(True)
+}
+
+// 51. RFC 8205 BGPsec AS-Path Cryptographic Security & Path Signatures Engine
+pub fn bgpsec_aspath_signature_test() {
+  let path = [4_242_421_732, 4_242_420_987, 4_242_420_125]
+  let segs = [
+    bgpsec.SecurePathSegment(
+      p_count: 1,
+      flags: 0,
+      target_asn: 4_242_420_125,
+      ski: "9F8E7D6C5B4A3120",
+      signature: "3045022100FA1B2C3D4E5F67890ABCDEF",
+    ),
+    bgpsec.SecurePathSegment(
+      p_count: 1,
+      flags: 0,
+      target_asn: 4_242_421_732,
+      ski: "8E7D6C5B4A312019",
+      signature: "3045022100EB1A2B3C4D5E6F7890ABCDEF",
+    ),
+    bgpsec.SecurePathSegment(
+      p_count: 1,
+      flags: 0,
+      target_asn: 4_242_420_987,
+      ski: "7D6C5B4A31201918",
+      signature: "3045022100DC1928374655AABBCCDDEEFF",
+    ),
+  ]
+
+  let valid_attr =
+    bgpsec.BgpsecAttribute(
+      direction: 0,
+      target_asn: 4_242_420_125,
+      origin_asn: 4_242_420_125,
+      secure_path: segs,
+    )
+
+  let valid_res = bgpsec.verify_bgpsec_path(path, valid_attr)
+  valid_res.validity |> should.equal(bgpsec.BgpsecValid)
+  valid_res.hop_count |> should.equal(3)
+
+  // Discrepancy test: truncated AS-Path
+  let truncated_path = [4_242_421_732, 4_242_420_125]
+  let trunc_res = bgpsec.verify_bgpsec_path(truncated_path, valid_attr)
+  case trunc_res.validity {
+    bgpsec.BgpsecInvalid(_) -> True
+    _ -> False
+  }
+  |> should.equal(True)
+
+  // Discrepancy test: spoofed Origin AS
+  let spoofed_attr = bgpsec.BgpsecAttribute(..valid_attr, origin_asn: 65_534)
+  let spoof_res = bgpsec.verify_bgpsec_path(path, spoofed_attr)
+  case spoof_res.validity {
+    bgpsec.BgpsecInvalid(_) -> True
+    _ -> False
+  }
+  |> should.equal(True)
+
+  // Formatting & JSON
+  let cli_rep = bgpsec.format_bgpsec_result(valid_res)
+  string.contains(cli_rep, "VALID (Cryptographically Signed & Intact)")
+  |> should.equal(True)
+
+  let json_rep = bgpsec.bgpsec_result_to_json(valid_res)
+  string.contains(json_rep, "\"validity\":\"valid\"") |> should.equal(True)
 }
