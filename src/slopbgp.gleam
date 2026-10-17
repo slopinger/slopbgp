@@ -63,6 +63,7 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["unnumbered", ..]
     | ["netmodel", ..]
     | ["otc", ..]
+    | ["aspa", ..]
     | ["bgpls", ..]
     | ["filter", ..] -> run_ctl(args)
     ["daemon", ..] | [] -> run_daemon()

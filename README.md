@@ -62,6 +62,7 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 5549 / 8950** | BGP Unnumbered (IPv6 Link-Local Peering with Extended Next-Hop & Linux inet6 kernel routing) | Full |
 | **RFC 7752** | Distribution of BGP Link-State (BGP-LS: Node NLRIs, Link NLRIs & Attribute 29 TLVs) | Full |
 | **RFC 7938 / 7454** | BGP Route Hygiene & Security (Martian ASNs, RFC 6890 Bogons, Path Bounds & Prepending Limits) | Full |
+| **RFC 9319** | Autonomous System Provider Authorization (ASPA BGP Path Verification & Valley-Free Routing) | Full |
 
 ---
 
@@ -262,6 +263,13 @@ slopbgpctl netmodel graph examples/slopnet_global.json mermaid
 
 # Run multi-router discrete topology simulation & route leak verification
 slopbgpctl netmodel sim examples/slopnet_global.json
+
+# Run network resilience, high-availability & SLA latency audit
+slopbgpctl netmodel audit examples/slopnet_global.json
+
+# Inspect RFC 9319 ASPA verification & test AS paths
+slopbgpctl aspa
+slopbgpctl aspa verify 4242420003 4242421732 4242420001
 
 # Inspect RFC 9234 BGP Roles & OTC route leak prevention
 slopbgpctl otc

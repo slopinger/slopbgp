@@ -6,6 +6,7 @@ import gleeunit/should
 import slopbgp/api/http
 import slopbgp/bfd/message as bfd_msg
 import slopbgp/bfd/session as bfd_session
+import slopbgp/bgp/aspa
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
 import slopbgp/bgp/bgpls
 import slopbgp/bgp/blackhole
@@ -48,6 +49,7 @@ import slopbgp/ip.{
 }
 import slopbgp/lookingglass/lookingglass as lg
 import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
+import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/sim as net_sim
@@ -2692,4 +2694,162 @@ pub fn global_network_simulation_route_leak_test() {
   let assert [leak] = stepped.leaks_detected
   leak.otc_as |> should.equal(4_242_420_088)
   string.contains(leak.reason, "RFC 9234 route leak") |> should.equal(True)
+}
+
+// 42. RFC 9319 ASPA Autonomous System Provider Authorization
+pub fn aspa_verification_test() {
+  // 1. Text parsing
+  let assert Ok(entry) =
+    aspa.parse_aspa_line("AS4242421732: AS4242420001, AS4242420002")
+  entry.customer_as |> should.equal(4_242_421_732)
+  entry.providers |> should.equal([4_242_420_001, 4_242_420_002])
+
+  let aspa_table =
+    aspa.new_aspa_table()
+    |> aspa.insert_aspa_record(entry)
+    |> aspa.insert_aspa_record(
+      aspa.AspaRecord(customer_as: 4_242_420_003, providers: [4_242_421_732]),
+    )
+
+  // 2. Customer path verification: up-ramp (4242420003 -> 4242421732)
+  let valid_cust_path = [AsSequence([4_242_420_003, 4_242_421_732])]
+  aspa.verify_aspa(valid_cust_path, RoleCustomer, aspa_table)
+  |> should.equal(aspa.AspaValid)
+
+  // 3. Customer path verification: invalid provider transition
+  let invalid_cust_path = [AsSequence([4_242_421_732, 4_242_420_003])]
+  aspa.verify_aspa(invalid_cust_path, RoleCustomer, aspa_table)
+  |> should.equal(aspa.AspaInvalid)
+
+  // 4. Unknown ASN in path
+  let unknown_cust_path = [AsSequence([4_242_429_999, 4_242_420_001])]
+  aspa.verify_aspa(unknown_cust_path, RoleCustomer, aspa_table)
+  |> should.equal(aspa.AspaUnknown)
+
+  // 5. Peer/Provider path verification
+  let valid_peer_path = [AsSequence([4_242_420_003, 4_242_421_732])]
+  aspa.verify_aspa(valid_peer_path, RolePeer, aspa_table)
+  |> should.equal(aspa.AspaValid)
+
+  let invalid_peer_path = [AsSequence([4_242_421_732, 4_242_420_003])]
+  aspa.verify_aspa(invalid_peer_path, RolePeer, aspa_table)
+  |> should.equal(aspa.AspaInvalid)
+}
+
+// 43. Global Network Topology Resilience & SLA Audit Engine
+pub fn netmodel_resilience_audit_test() {
+  let reg_eu = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let reg_us = net_model.Region("us", "New York", "US", 42, 40.71, -74.0)
+
+  let r_core1 =
+    net_model.RouterNode(
+      id: "fra-core1",
+      hostname: "fra-core1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+  let r_edge1 =
+    net_model.RouterNode(
+      id: "fra-edge1",
+      hostname: "fra-edge1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.20.10.11",
+      loopback_v4: "172.20.10.11/32",
+      loopback_v6: "fd42::11/128",
+      bgp_port: 179,
+      api_port: 8788,
+      extra_tags: [],
+    )
+
+  let link_fra =
+    net_model.InterRouterLink(
+      id: "fra_link",
+      endpoint_a: "fra-core1",
+      endpoint_b: "fra-edge1",
+      link_type: net_model.LinkWireGuard,
+      cost: 10,
+      latency_ms: 2,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.10.11",
+    )
+
+  let link_wan_nobfd =
+    net_model.InterRouterLink(
+      id: "wan_link",
+      endpoint_a: "fra-core1",
+      endpoint_b: "nyc-core1",
+      link_type: net_model.LinkWireGuard,
+      cost: 75,
+      latency_ms: 70,
+      bandwidth_mbps: 1000,
+      bfd: False,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.20.1",
+    )
+
+  let r_nyc =
+    net_model.RouterNode(
+      id: "nyc-core1",
+      hostname: "nyc-core1.slopnet",
+      region_id: "us",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.20.1",
+      loopback_v4: "172.20.20.1/32",
+      loopback_v6: "fd42::21/128",
+      bgp_port: 179,
+      api_port: 8789,
+      extra_tags: [],
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "audit-test-net",
+      asn: 4_242_421_732,
+      regions: [reg_eu, reg_us],
+      routers: [r_core1, r_edge1, r_nyc],
+      links: [link_fra, link_wan_nobfd],
+      external_peers: [],
+    )
+
+  let report = net_audit.audit_network_model(model)
+
+  // Single-homed edge detected + WAN without BFD detected
+  list.length(report.findings) |> should.equal(2)
+
+  let assert Ok(rr_finding) =
+    list.find(report.findings, fn(f) { f.category == "High Availability" })
+  rr_finding.target |> should.equal("fra-edge1")
+  rr_finding.severity |> should.equal(net_audit.SeverityWarning)
+
+  let assert Ok(bfd_finding) =
+    list.find(report.findings, fn(f) { f.category == "BFD Fast Failover" })
+  bfd_finding.target |> should.equal("wan_link")
+
+  // Health score calculation (100 - 2 * 5 = 90)
+  report.health_score |> should.equal(90)
+
+  // SLA matrix
+  list.length(report.sla_matrix) |> should.equal(1)
+  let assert [sla] = report.sla_matrix
+  sla.direct_latency_ms |> should.equal(70)
+  sla.sla_status |> should.equal("EXCELLENT")
+
+  // Serialization
+  let json_rep = net_audit.audit_report_to_json(report)
+  string.contains(json_rep, "\"health_score\":90") |> should.equal(True)
+
+  let cli_rep = net_audit.format_audit_report(report)
+  string.contains(cli_rep, "Health Score: 90/100") |> should.equal(True)
 }

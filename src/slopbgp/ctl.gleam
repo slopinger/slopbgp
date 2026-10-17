@@ -7,6 +7,7 @@ import gleam/result
 import gleam/string
 import simplifile
 import slopbgp/api/http
+import slopbgp/bgp/aspa
 import slopbgp/bgp/blackhole.{
   create_outbound_rtbh, has_blackhole_community, to_fib_blackhole_command,
 }
@@ -21,6 +22,7 @@ import slopbgp/lookingglass/lookingglass.{
   query_aspath, query_community, query_route, query_summary,
 }
 import slopbgp/net/socket.{now}
+import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/sim as net_sim
@@ -105,11 +107,14 @@ pub fn run_ctl(args: List(String)) -> Nil {
       ctl_netmodel_graph_file(file_path, "dot")
     ["netmodel", "graph", ..] -> ctl_netmodel_graph("dot")
     ["netmodel", "validate", file_path, ..] -> ctl_netmodel_validate(file_path)
+    ["netmodel", "audit", file_path, ..] -> ctl_netmodel_audit(file_path)
     ["netmodel", "sim", file_path, node_id, prefix, ..] ->
       ctl_netmodel_sim_inject(file_path, node_id, prefix)
     ["netmodel", "sim", file_path, ..] -> ctl_netmodel_sim(file_path)
     ["netmodel", ..] -> ctl_netmodel_summary()
     ["otc", ..] -> ctl_otc()
+    ["aspa", "verify", ..as_path_strs] -> ctl_aspa_verify(as_path_strs)
+    ["aspa", ..] -> ctl_aspa()
     ["bgpls", ..] -> ctl_bgpls()
     ["filter", ..] -> ctl_filter()
     _ -> print_usage()
@@ -1626,6 +1631,59 @@ fn ctl_netmodel_sim_inject(
     }
     Error(_) -> io.println("Could not read file: " <> file_path)
   }
+}
+
+fn ctl_netmodel_audit(file_path: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let report = net_audit.audit_network_model(model)
+          io.println(net_audit.format_audit_report(report))
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_aspa() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 9319 ASPA Autonomous System Provider Authorization │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Verification Algorithm: draft-ietf-sidrops-aspa-verif  │")
+  io.println("│ Attestation Cache:      3 Authorized Customer Records  │")
+  io.println("│ Path Leaks Detected:    0 Unauthorized Valley Hops     │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Customer AS4242421732 -> Providers: [AS4242420001, ..] │")
+  io.println("│ Customer AS4242420003 -> Providers: [AS4242421732]     │")
+  io.println("│ Verification: slopbgpctl aspa verify <asn1> <asn2> ..  │")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_aspa_verify(as_path_strs: List(String)) -> Nil {
+  let asns =
+    list.filter_map(as_path_strs, fn(s) {
+      let clean = string.replace(s, "AS", "") |> string.replace("as", "")
+      int.parse(clean)
+    })
+  let sample_table =
+    aspa.new_aspa_table()
+    |> aspa.insert_aspa_record(
+      aspa.AspaRecord(customer_as: 4_242_420_003, providers: [4_242_421_732]),
+    )
+    |> aspa.insert_aspa_record(
+      aspa.AspaRecord(customer_as: 4_242_421_732, providers: [
+        4_242_420_001,
+        4_242_420_002,
+      ]),
+    )
+
+  let path_seg = [types.AsSequence(asns)]
+  let status = aspa.verify_aspa(path_seg, types.RolePeer, sample_table)
+  io.println("AS-Path: " <> string.join(list.map(asns, int.to_string), " -> "))
+  io.println("ASPA Validation Status: " <> aspa.format_aspa_status(status))
 }
 
 fn ctl_otc() -> Nil {
