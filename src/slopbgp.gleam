@@ -1,12 +1,14 @@
 import envoy
+import gleam/erlang/process
 import gleam/int
 import gleam/io
 import gleam/list
 import slopbgp/config.{default_config, load_config_file}
 import slopbgp/ctl.{run_ctl}
 import slopbgp/ip.{ip_to_string}
+import slopbgp/net/http_server.{start_http_listener}
 import slopbgp/net/socket.{now}
-import slopbgp/server.{new_server, tick_server}
+import slopbgp/server.{type ServerState, new_server, tick_server}
 import slopbgp/simulator.{run_simulation}
 
 @external(erlang, "slopbgp_ffi", "get_args")
@@ -111,4 +113,19 @@ fn run_daemon() -> Nil {
   // Run initial tick and test simulation to verify full engine convergence
   let _ = tick_server(srv, now())
   io.println("[server] Ready to accept BGP peering sessions.")
+
+  // Start background HTTP management server and dashboard
+  process.spawn(fn() { start_http_listener(srv, cfg.api_port) })
+
+  // Start background ticker
+  process.spawn(fn() { run_ticker(srv) })
+
+  // Keep daemon alive
+  process.sleep_forever()
+}
+
+fn run_ticker(srv: ServerState) -> Nil {
+  process.sleep(1000)
+  let _ = tick_server(srv, now())
+  run_ticker(srv)
 }
