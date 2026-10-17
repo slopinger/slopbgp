@@ -383,9 +383,8 @@ services.slopbgp = {
 
 ---
 
-## Mirrors
+## Source
 
-* **GitLab (Canonical)**: [https://git.freifick.net/slop/slopbgp](https://git.freifick.net/slop/slopbgp)
-* **GitHub (Mirror)**: [https://github.com/slopinger/slopbgp](https://github.com/slopinger/slopbgp)
+Source: [https://github.com/slopinger/slopbgp](https://github.com/slopinger/slopbgp)
 
 Licensed under the [MIT License](LICENSE).
