@@ -285,6 +285,15 @@ slopbgpctl otc
 # Inspect RFC 7752 BGP-LS Link-State
 slopbgpctl bgpls
 
+# Preview GitOps fleet provisioning plan across all network routers
+slopbgpctl netmodel plan examples/slopnet_global.json
+
+# Step-by-step route policy trace & dry-run evaluation
+slopbgpctl filter test 172.20.10.0/24 4242421732 64511:1
+
+# Static analysis, shadowed rule detection & policy optimization
+slopbgpctl filter audit
+
 # Inspect SlopFilter policy pipeline & RFC 7938 route hygiene
 slopbgpctl filter
 ```

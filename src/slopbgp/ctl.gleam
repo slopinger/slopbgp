@@ -26,10 +26,13 @@ import slopbgp/net/socket.{now}
 import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/plan as net_plan
 import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
 import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter.{dn42_default_import_policy}
+import slopbgp/policy/optimizer as policy_optimizer
+import slopbgp/policy/trace as policy_trace
 import slopbgp/rib/rib.{get_all_routes}
 import slopbgp/rtr/client.{new_rtr_client}
 import slopbgp/server.{new_server}
@@ -118,6 +121,7 @@ pub fn run_ctl(args: List(String)) -> Nil {
       ctl_netmodel_whatif(file_path, net_whatif.ScenarioDrainNode(node_id))
     ["netmodel", "whatif", file_path, ..] ->
       ctl_netmodel_whatif_default(file_path)
+    ["netmodel", "plan", file_path, ..] -> ctl_netmodel_plan(file_path)
     ["netmodel", "sim", file_path, node_id, prefix, ..] ->
       ctl_netmodel_sim_inject(file_path, node_id, prefix)
     ["netmodel", "sim", file_path, ..] -> ctl_netmodel_sim(file_path)
@@ -127,6 +131,9 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["aspa", ..] -> ctl_aspa()
     ["llgr", ..] -> ctl_llgr()
     ["bgpls", ..] -> ctl_bgpls()
+    ["filter", "test", prefix, asn_str, ..comms] ->
+      ctl_filter_test(prefix, asn_str, comms)
+    ["filter", "audit", ..] -> ctl_filter_audit()
     ["filter", ..] -> ctl_filter()
     _ -> print_usage()
   }
@@ -1006,6 +1013,15 @@ fn print_usage() -> Nil {
   io.println(
     "  slopbgpctl llgr                Show RFC 8538 Long-Lived Graceful Restart status",
   )
+  io.println(
+    "  slopbgpctl netmodel plan <file> Preview GitOps fleet provisioning plan",
+  )
+  io.println(
+    "  slopbgpctl filter test <pfx> <as> Step-by-step route policy trace",
+  )
+  io.println(
+    "  slopbgpctl filter audit        Static analysis & rule optimization",
+  )
 }
 
 fn ctl_rtr() -> Nil {
@@ -1826,4 +1842,75 @@ fn ctl_netmodel_whatif_default(file_path: String) -> Nil {
     }
     Error(_) -> io.println("Could not read file: " <> file_path)
   }
+}
+
+fn ctl_netmodel_plan(file_path: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let fleet_plan = net_plan.generate_fleet_plan(model)
+          io.println(net_plan.format_fleet_plan(fleet_plan))
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_filter_test(
+  prefix_str: String,
+  asn_str: String,
+  comms_strs: List(String),
+) -> Nil {
+  case ip.parse_prefix(prefix_str), int.parse(asn_str) {
+    Ok(pfx), Ok(asn) -> {
+      let comms =
+        list.filter_map(comms_strs, fn(s) {
+          case string.split(s, ":") {
+            [a_str, v_str] -> {
+              case int.parse(a_str), int.parse(v_str) {
+                Ok(a), Ok(v) -> Ok(types.Community(a, v))
+                _, _ -> Error(Nil)
+              }
+            }
+            _ -> Error(Nil)
+          }
+        })
+      let r =
+        types.Route(
+          prefix: pfx,
+          origin: types.OriginIgp,
+          as_path: [types.AsSequence([asn])],
+          next_hop: types.Ipv4(172, 22, 64, 1),
+          med: 0,
+          local_pref: 100,
+          atomic_aggregate: False,
+          communities: comms,
+          large_communities: [],
+          ext_communities: [],
+          otc: None,
+          roa_status: types.RoaValid,
+          peer_id: "test_peer",
+          timestamp: 0,
+          path_id: None,
+          originator_id: None,
+          cluster_list: [],
+        )
+      let chain = dn42_default_import_policy()
+      let trace_res = policy_trace.trace_policy(r, chain)
+      io.println(policy_trace.format_trace_result(trace_res))
+    }
+    _, _ ->
+      io.println(
+        "Invalid prefix or ASN. Usage: slopbgpctl filter test <prefix> <asn> [communities...]",
+      )
+  }
+}
+
+fn ctl_filter_audit() -> Nil {
+  let chain = dn42_default_import_policy()
+  let audit_res = policy_optimizer.audit_and_optimize(chain)
+  io.println(policy_optimizer.format_audit_report(audit_res))
 }

@@ -53,10 +53,13 @@ import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
 import slopbgp/netmodel/audit as net_audit
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/plan as net_plan
 import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
 import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter as policy_filter
+import slopbgp/policy/optimizer as policy_optimizer
+import slopbgp/policy/trace as policy_trace
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/routeserver/routeserver
 import slopbgp/rtr/client as rtr_client
@@ -64,21 +67,22 @@ import slopbgp/rtr/message as rtr_msg
 import slopbgp/server
 import slopbgp/simulator.{run_simulation}
 import slopbgp/types.{
-  type Route, ActionAccept, ActionPrependAs, ActionSetLocalPref, AfiIpv4,
-  AfiIpv6, AsConfedSequence, AsConfedSet, AsSequence, AttrAsPath,
-  AttrClusterList, AttrCommunities, AttrLargeCommunities, AttrLocalPref, AttrMed,
-  AttrMpReachNlri, AttrNextHop, AttrOrigin, AttrOriginatorId, BmpMsgInitiation,
-  BmpMsgPeerDown, BmpMsgRouteMonitoring, BmpMsgStatsReport, BmpMsgTermination,
-  BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
-  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn,
-  CapLongLivedGracefulRestart, CapMultiProtocol, CapRouteRefresh, Community,
-  FlowActionDrop, FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowLabel,
-  FlowNextHeader, FlowSrcPrefix, FlowspecRule, IpPrefix, Ipv4, Ipv6,
-  LargeCommunity, LlgrAfiSafi, MatchAsPathContains, MsgKeepalive,
-  MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain,
-  PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, RolePeer,
-  RoleProvider, RoleRouteServer, RoleRouteServerClient, Route, SafiUnicast,
-  StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
+  type Route, ActionAccept, ActionAddCommunity, ActionPrependAs, ActionReject,
+  ActionSetLocalPref, AfiIpv4, AfiIpv6, AsConfedSequence, AsConfedSet,
+  AsSequence, AttrAsPath, AttrClusterList, AttrCommunities, AttrLargeCommunities,
+  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop, AttrOrigin,
+  AttrOriginatorId, BmpMsgInitiation, BmpMsgPeerDown, BmpMsgRouteMonitoring,
+  BmpMsgStatsReport, BmpMsgTermination, BmpPeerHeader, BmpStatCounter,
+  CapAddPath, CapBgpRole, CapEnhancedRouteRefresh, CapExtendedMessage,
+  CapExtendedNextHop, CapFourOctetAsn, CapLongLivedGracefulRestart,
+  CapMultiProtocol, CapRouteRefresh, Community, FlowActionDrop, FlowDstPort,
+  FlowDstPrefix, FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix,
+  FlowspecRule, IpPrefix, Ipv4, Ipv6, LargeCommunity, LlgrAfiSafi,
+  MatchAsPathContains, MsgKeepalive, MsgNotification, MsgOpen, MsgRouteRefresh,
+  OriginIgp, PeerConfig, PolicyChain, PolicyRule, RoaInvalid, RoaNotFound,
+  RoaValid, RoleCustomer, RolePeer, RoleProvider, RoleRouteServer,
+  RoleRouteServerClient, Route, SafiUnicast, StateConnect, StateEstablished,
+  StateOpenConfirm, StateOpenSent,
 }
 import slopbgp/vrf/vrf
 
@@ -3026,4 +3030,216 @@ pub fn netmodel_whatif_blast_radius_test() {
   let cli_rep = net_whatif.format_whatif_report(report_link)
   string.contains(cli_rep, "slopbgp // What-If Blast Radius")
   |> should.equal(True)
+}
+
+// 46. SlopFilter Policy Trace Engine
+pub fn policy_trace_engine_test() {
+  let assert Ok(pfx) = parse_prefix("172.20.10.0/24")
+  let r =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [Community(64_511, 1)],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "test_peer",
+      timestamp: 0,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let rule_drop_invalid =
+    PolicyRule(
+      name: "reject_roa_invalid",
+      matches: [types.MatchRoa(RoaInvalid)],
+      actions: [ActionReject],
+    )
+  let rule_boost_lat =
+    PolicyRule(
+      name: "boost_low_latency",
+      matches: [types.MatchCommunity(Community(64_511, 1))],
+      actions: [
+        ActionSetLocalPref(150),
+        ActionAddCommunity(Community(4_242_420_125, 100)),
+      ],
+    )
+  let rule_default_accept =
+    PolicyRule(name: "default_accept", matches: [types.MatchAny], actions: [
+      ActionAccept,
+    ])
+
+  let chain =
+    PolicyChain(name: "trace_test_policy", default_action: ActionAccept, rules: [
+      rule_drop_invalid,
+      rule_boost_lat,
+      rule_default_accept,
+    ])
+
+  let trace_res = policy_trace.trace_policy(r, chain)
+
+  trace_res.accepted |> should.equal(True)
+  trace_res.final_route.local_pref |> should.equal(150)
+  trace_res.terminal_rule |> should.equal("default_accept")
+  list.length(trace_res.steps) |> should.equal(3)
+
+  let assert [s1, s2, s3] = trace_res.steps
+
+  // Step 1 missed
+  s1.matched |> should.equal(False)
+
+  // Step 2 matched and continued
+  s2.matched |> should.equal(True)
+  s2.is_terminal |> should.equal(False)
+  list.length(s2.actions_executed) |> should.equal(2)
+
+  // Step 3 matched and terminated
+  s3.matched |> should.equal(True)
+  s3.is_terminal |> should.equal(True)
+
+  // Format & JSON
+  let cli_rep = policy_trace.format_trace_result(trace_res)
+  string.contains(cli_rep, "ACCEPTED") |> should.equal(True)
+
+  let json_rep = policy_trace.trace_result_to_json(trace_res)
+  string.contains(json_rep, "\"final_local_pref\":150") |> should.equal(True)
+}
+
+// 47. SlopFilter Static Policy Optimizer & Audit Engine
+pub fn policy_optimizer_audit_test() {
+  let rule_term_uncond =
+    PolicyRule(
+      name: "drop_all_unconditional",
+      matches: [types.MatchAny],
+      actions: [ActionReject],
+    )
+  let rule_shadowed =
+    PolicyRule(
+      name: "unreachable_shadowed_rule",
+      matches: [types.MatchRoa(RoaValid)],
+      actions: [ActionAccept],
+    )
+  let rule_empty =
+    PolicyRule(
+      name: "empty_useless_rule",
+      matches: [types.MatchAny],
+      actions: [],
+    )
+
+  let unopt_chain =
+    PolicyChain(
+      name: "unoptimized_policy",
+      default_action: ActionAccept,
+      rules: [rule_empty, rule_term_uncond, rule_shadowed],
+    )
+
+  let audit_res = policy_optimizer.audit_and_optimize(unopt_chain)
+
+  audit_res.total_rules_original |> should.equal(3)
+  audit_res.total_rules_optimized |> should.equal(1)
+  list.length(audit_res.issues) |> should.equal(2)
+
+  // Verify recommendations & issues
+  let assert Ok(_empty_iss) =
+    list.find(audit_res.issues, fn(i) {
+      case i {
+        policy_optimizer.IssueEmptyRule("empty_useless_rule") -> True
+        _ -> False
+      }
+    })
+  let assert Ok(_shad_iss) =
+    list.find(audit_res.issues, fn(i) {
+      case i {
+        policy_optimizer.IssueShadowedRule("unreachable_shadowed_rule", _) ->
+          True
+        _ -> False
+      }
+    })
+
+  // Format & JSON
+  let cli_rep = policy_optimizer.format_audit_report(audit_res)
+  string.contains(cli_rep, "Shadowed Rule") |> should.equal(True)
+
+  let json_rep = policy_optimizer.audit_report_to_json(audit_res)
+  string.contains(json_rep, "\"total_rules_optimized\":1") |> should.equal(True)
+}
+
+// 48. NetModel GitOps Fleet Deployment Plan Engine
+pub fn netmodel_gitops_fleet_plan_test() {
+  let reg_eu = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let r_core =
+    net_model.RouterNode(
+      id: "fra-core1",
+      hostname: "fra-core1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+  let r_edge =
+    net_model.RouterNode(
+      id: "fra-edge1",
+      hostname: "fra-edge1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.20.10.11",
+      loopback_v4: "172.20.10.11/32",
+      loopback_v6: "fd42::11/128",
+      bgp_port: 179,
+      api_port: 8788,
+      extra_tags: [],
+    )
+  let link =
+    net_model.InterRouterLink(
+      id: "fra_local",
+      endpoint_a: "fra-core1",
+      endpoint_b: "fra-edge1",
+      link_type: net_model.LinkWireGuard,
+      cost: 10,
+      latency_ms: 2,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.10.11",
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "fleet-plan-net",
+      asn: 4_242_421_732,
+      regions: [reg_eu],
+      routers: [r_core, r_edge],
+      links: [link],
+      external_peers: [],
+    )
+
+  let fleet_plan = net_plan.generate_fleet_plan(model)
+
+  fleet_plan.total_routers |> should.equal(2)
+  fleet_plan.all_hot_reloadable |> should.equal(True)
+  { fleet_plan.total_actions > 0 } |> should.equal(True)
+
+  let node_plan = net_plan.generate_node_plan(model, "fra-core1")
+  node_plan |> should.be_ok()
+
+  // Format & JSON
+  let cli_rep = net_plan.format_fleet_plan(fleet_plan)
+  string.contains(cli_rep, "slopbgp GitOps Fleet Deployment Plan")
+  |> should.equal(True)
+
+  let json_rep = net_plan.fleet_plan_to_json(fleet_plan)
+  string.contains(json_rep, "\"all_hot_reloadable\":true") |> should.equal(True)
 }
