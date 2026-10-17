@@ -60,6 +60,8 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 4364 / 4659** | BGP/MPLS IP Virtual Private Networks (L3VPN Multi-VRF Isolation, RD Type 0/1/2 & Route Targets) | Full |
 | **RFC 8669** | BGP Prefix-SID for Segment Routing (Path Attribute 40, Label-Index, IPv6 SRv6 SID & SRGB) | Full |
 | **RFC 5549 / 8950** | BGP Unnumbered (IPv6 Link-Local Peering with Extended Next-Hop & Linux inet6 kernel routing) | Full |
+| **RFC 7752** | Distribution of BGP Link-State (BGP-LS: Node NLRIs, Link NLRIs & Attribute 29 TLVs) | Full |
+| **RFC 7938 / 7454** | BGP Route Hygiene & Security (Martian ASNs, RFC 6890 Bogons, Path Bounds & Prepending Limits) | Full |
 
 ---
 
@@ -252,6 +254,23 @@ slopbgpctl sr
 
 # Inspect RFC 5549 / RFC 8950 BGP Unnumbered IPv6 Link-Local Peering
 slopbgpctl unnumbered
+
+# Global Network Model compiler, topology graphviz/mermaid exporter, and validator
+slopbgpctl netmodel validate examples/slopnet_global.json
+slopbgpctl netmodel compile examples/slopnet_global.json fra-core1
+slopbgpctl netmodel graph examples/slopnet_global.json mermaid
+
+# Run multi-router discrete topology simulation & route leak verification
+slopbgpctl netmodel sim examples/slopnet_global.json
+
+# Inspect RFC 9234 BGP Roles & OTC route leak prevention
+slopbgpctl otc
+
+# Inspect RFC 7752 BGP-LS Link-State
+slopbgpctl bgpls
+
+# Inspect SlopFilter policy pipeline & RFC 7938 route hygiene
+slopbgpctl filter
 ```
 
 ---
