@@ -24,13 +24,16 @@ import slopbgp/bgp/graceful_shutdown.{
   apply_graceful_shutdown_inbound, apply_graceful_shutdown_outbound,
   graceful_shutdown_community, has_graceful_shutdown,
 }
+import slopbgp/bgp/l3vpn
 import slopbgp/bgp/message.{decode_message, encode_message}
+import slopbgp/bgp/prefix_sid
 import slopbgp/bgp/rfc8212
 import slopbgp/bgp/routereflector
 import slopbgp/bgp/shutdown_communication.{
   decode_shutdown_communication, encode_shutdown_communication,
   format_cease_subcode, make_shutdown_notification,
 }
+import slopbgp/bgp/unnumbered
 import slopbgp/bmp/message as bmp_message
 import slopbgp/config
 import slopbgp/dn42/filter.{is_bogon, is_valid_dn42_network}
@@ -57,12 +60,13 @@ import slopbgp/types.{
   BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
   CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapMultiProtocol,
   CapRouteRefresh, Community, FlowActionDrop, FlowDstPort, FlowDstPrefix,
-  FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix, FlowspecRule, Ipv4,
-  Ipv6, LargeCommunity, MatchAsPathContains, MsgKeepalive, MsgNotification,
-  MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain, PolicyRule,
-  RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, Route, SafiUnicast,
-  StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
+  FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix, FlowspecRule,
+  IpPrefix, Ipv4, Ipv6, LargeCommunity, MatchAsPathContains, MsgKeepalive,
+  MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain,
+  PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, Route,
+  SafiUnicast, StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
 }
+import slopbgp/vrf/vrf
 
 pub fn main() {
   gleeunit.main()
@@ -1665,4 +1669,270 @@ pub fn looking_glass_test() {
   let bh_json = http.render_json_blackhole(routes)
   string.contains(bh_json, "RFC 7999") |> should.equal(True)
   string.contains(bh_json, "65535:666") |> should.equal(True)
+}
+
+// 30. RFC 4364 / RFC 4659 BGP/MPLS IP Virtual Private Networks (L3VPN)
+pub fn l3vpn_rfc4364_test() {
+  // Test Route Targets
+  let rt_asn2 = l3vpn.RtAsn2(42_424, 100)
+  let ext_asn2 = l3vpn.encode_route_target(rt_asn2)
+  let assert Ok(dec_asn2) = l3vpn.decode_route_target(ext_asn2)
+  dec_asn2 |> should.equal(rt_asn2)
+
+  let rt_ipv4 = l3vpn.RtIpv4(Ipv4(172, 22, 64, 1), 100)
+  let ext_ipv4 = l3vpn.encode_route_target(rt_ipv4)
+  let assert Ok(dec_ipv4) = l3vpn.decode_route_target(ext_ipv4)
+  dec_ipv4 |> should.equal(rt_ipv4)
+
+  let rt_asn4 = l3vpn.RtAsn4(4_242_420_125, 200)
+  let ext_asn4 = l3vpn.encode_route_target(rt_asn4)
+  let assert Ok(dec_asn4) = l3vpn.decode_route_target(ext_asn4)
+  dec_asn4 |> should.equal(rt_asn4)
+
+  // Route Target string parsing
+  let assert Ok(parsed_rt1) = l3vpn.parse_route_target("target:4242420125:200")
+  parsed_rt1 |> should.equal(rt_asn4)
+  let assert Ok(parsed_rt2) = l3vpn.parse_route_target("172.22.64.1:100")
+  parsed_rt2 |> should.equal(rt_ipv4)
+
+  // Test Route Origin (Site of Origin)
+  let soo = l3vpn.SooAsn4(4_242_420_125, 500)
+  let ext_soo = l3vpn.encode_route_origin(soo)
+  let assert Ok(dec_soo) = l3vpn.decode_route_origin(ext_soo)
+  dec_soo |> should.equal(soo)
+
+  // Test 24-bit MPLS Label encoding & decoding
+  let label_bytes = l3vpn.encode_mpls_label(1001, True)
+  let assert Ok(#(dec_label, is_bottom)) = l3vpn.decode_mpls_label(label_bytes)
+  dec_label |> should.equal(1001)
+  is_bottom |> should.equal(True)
+
+  // Test VPN-IPv4 NLRI wire roundtrip
+  let v4_route =
+    l3vpn.MplsVpnRoute(
+      rd: evpn.RdAsn4(4_242_420_125, 100),
+      label: 1001,
+      prefix: IpPrefix(Ipv4(10, 100, 1, 0), 24),
+    )
+  let nlri_v4_bin = l3vpn.encode_vpn_nlri(v4_route)
+  let assert Ok(decoded_v4_routes) = l3vpn.decode_vpn_nlri(nlri_v4_bin, False)
+  case decoded_v4_routes {
+    [d_route] -> {
+      d_route.rd |> should.equal(v4_route.rd)
+      d_route.label |> should.equal(1001)
+      d_route.prefix |> should.equal(v4_route.prefix)
+    }
+    _ -> panic as "Expected single VPN-IPv4 route"
+  }
+
+  // Test VPN-IPv6 NLRI wire roundtrip
+  let v6_prefix = IpPrefix(Ipv6(0xfdd4, 0xaf47, 0xdcfa, 0x0001, 0, 0, 0, 0), 64)
+  let v6_route =
+    l3vpn.MplsVpnRoute(
+      rd: evpn.RdAsn4(4_242_420_125, 200),
+      label: 2001,
+      prefix: v6_prefix,
+    )
+  let nlri_v6_bin = l3vpn.encode_vpn_nlri(v6_route)
+  let assert Ok(decoded_v6_routes) = l3vpn.decode_vpn_nlri(nlri_v6_bin, True)
+  case decoded_v6_routes {
+    [d_v6] -> {
+      d_v6.rd |> should.equal(v6_route.rd)
+      d_v6.label |> should.equal(2001)
+      d_v6.prefix |> should.equal(v6_prefix)
+    }
+    _ -> panic as "Expected single VPN-IPv6 route"
+  }
+}
+
+// 31. Multi-Tenant VRF Isolation & Routing Engine Tests
+pub fn vrf_isolation_test() {
+  let mgr0 = vrf.new_manager()
+  let vrf_red =
+    vrf.VrfConfig(
+      name: "tenant-red",
+      rd: evpn.RdAsn4(4_242_420_125, 100),
+      import_targets: [l3vpn.RtAsn4(4_242_420_125, 100)],
+      export_targets: [l3vpn.RtAsn4(4_242_420_125, 100)],
+      table_id: 100,
+      export_label: 1001,
+    )
+  let vrf_blue =
+    vrf.VrfConfig(
+      name: "tenant-blue",
+      rd: evpn.RdAsn4(4_242_420_125, 200),
+      import_targets: [l3vpn.RtAsn4(4_242_420_125, 200)],
+      export_targets: [l3vpn.RtAsn4(4_242_420_125, 200)],
+      table_id: 200,
+      export_label: 2001,
+    )
+
+  let mgr1 = vrf.add_vrf(vrf.add_vrf(mgr0, vrf_red), vrf_blue)
+  list.length(vrf.list_vrfs(mgr1)) |> should.equal(2)
+
+  // Create an inbound BGP VPN route carrying target:4242420125:100 (for tenant-red)
+  let rt_ext = l3vpn.encode_route_target(l3vpn.RtAsn4(4_242_420_125, 100))
+  let base_route =
+    Route(
+      prefix: IpPrefix(Ipv4(10, 100, 1, 0), 24),
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_420_125])],
+      next_hop: Ipv4(172, 22, 64, 129),
+      med: 0,
+      local_pref: 150,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [rt_ext],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "edge_peer",
+      timestamp: 1000,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+  let vpn_route =
+    l3vpn.MplsVpnRoute(
+      rd: evpn.RdAsn4(4_242_420_125, 100),
+      label: 1001,
+      prefix: base_route.prefix,
+    )
+
+  let mgr2 = vrf.import_vpn_route(mgr1, vpn_route, base_route)
+
+  // Verify tenant-red received the route
+  let assert Ok(red_table) = vrf.get_vrf(mgr2, "tenant-red")
+  list.length(red_table.routes) |> should.equal(1)
+  case red_table.routes {
+    [r] -> {
+      r.prefix |> should.equal(base_route.prefix)
+      r.local_pref |> should.equal(150)
+    }
+    _ -> panic as "Expected route in tenant-red"
+  }
+
+  // Verify tenant-blue did NOT receive the route (perfect tenant separation)
+  let assert Ok(blue_table) = vrf.get_vrf(mgr2, "tenant-blue")
+  list.length(blue_table.routes) |> should.equal(0)
+
+  // Test route export from VRF
+  let #(exp_vpn_route, exp_exts) = vrf.export_vrf_route(red_table, base_route)
+  exp_vpn_route.label |> should.equal(1001)
+  exp_vpn_route.rd |> should.equal(vrf_red.rd)
+  list.length(exp_exts) |> should.equal(1)
+
+  // Test Linux FIB command generation
+  let fib_cmds = vrf.generate_vrf_fib_commands(red_table)
+  case fib_cmds {
+    [cmd] -> {
+      string.contains(
+        cmd,
+        "ip route replace 10.100.1.0/24 via 172.22.64.129 table 100",
+      )
+      |> should.equal(True)
+    }
+    _ -> panic as "Expected 1 FIB command"
+  }
+
+  // Test JSON rendering
+  let json_str = vrf.vrf_manager_to_json(mgr2)
+  string.contains(json_str, "tenant-red") |> should.equal(True)
+  string.contains(json_str, "tenant-blue") |> should.equal(True)
+}
+
+// 32. RFC 8669 BGP Prefix-SID for Segment Routing (SR-MPLS / SRv6)
+pub fn prefix_sid_rfc8669_test() {
+  let label_idx_tlv = prefix_sid.LabelIndexTlv(label_index: 125, flags: 0)
+  let srv6_ip = Ipv6(0xfdd4, 0xaf47, 0xdcfa, 0x0001, 0, 0, 0, 1)
+  let srv6_tlv = prefix_sid.Ipv6SidTlv(sid: srv6_ip, flags: 0)
+  let srgb_tlv =
+    prefix_sid.OriginatorSrgbTlv(flags: 0, blocks: [
+      prefix_sid.SrgbBlock(base_label: 16_000, range_size: 8000),
+    ])
+
+  let sid = prefix_sid.BgpPrefixSid(tlvs: [label_idx_tlv, srv6_tlv, srgb_tlv])
+
+  // Wire encoding
+  let attr_bin = prefix_sid.encode_prefix_sid(sid)
+  // Verify BGP Path Attribute header: 0xC0 (Flags), 40 (Attribute Type 40), 16-bit Length
+  let assert <<0xC0:8, 40:8, len:16, payload:bits>> = attr_bin
+  len |> should.equal(43)
+
+  // Wire decoding
+  let assert Ok(decoded_sid) = prefix_sid.decode_prefix_sid(payload)
+  list.length(decoded_sid.tlvs) |> should.equal(3)
+
+  case decoded_sid.tlvs {
+    [t1, t2, t3] -> {
+      t1 |> should.equal(label_idx_tlv)
+      t2 |> should.equal(srv6_tlv)
+      t3 |> should.equal(srgb_tlv)
+    }
+    _ -> panic as "Expected 3 TLVs"
+  }
+
+  // JSON rendering
+  let json_str = prefix_sid.prefix_sid_to_json(sid)
+  string.contains(json_str, "label_index") |> should.equal(True)
+  string.contains(json_str, "125") |> should.equal(True)
+  string.contains(json_str, "srv6_sid") |> should.equal(True)
+  string.contains(json_str, "16000") |> should.equal(True)
+}
+
+// 33. RFC 5549 / RFC 8950 BGP Unnumbered (IPv6 Link-Local Peering)
+pub fn unnumbered_rfc5549_test() {
+  let link_local = Ipv6(0xfe80, 0, 0, 0, 0, 0, 0, 1)
+  let global_v6 = Ipv6(0xfdd4, 0xaf47, 0xdcfa, 0, 0, 0, 0, 1)
+  let v4_addr = Ipv4(172, 22, 64, 1)
+
+  // Link local check
+  unnumbered.is_link_local(link_local) |> should.equal(True)
+  unnumbered.is_link_local(global_v6) |> should.equal(False)
+  unnumbered.is_link_local(v4_addr) |> should.equal(False)
+
+  // Scoped link-local string
+  let scoped =
+    unnumbered.format_scoped_link_local(link_local, "dn42-peer-klaus")
+  scoped |> should.equal("fe80:0:0:0:0:0:0:1%dn42-peer-klaus")
+
+  // Kernel unnumbered route formatting
+  let pfx_v4 = IpPrefix(Ipv4(172, 22, 64, 128), 27)
+  let cmd_v4 =
+    unnumbered.format_kernel_unnumbered_route(
+      pfx_v4,
+      link_local,
+      "dn42-peer-klaus",
+    )
+  cmd_v4
+  |> should.equal(
+    "ip route replace 172.22.64.128/27 via inet6 fe80:0:0:0:0:0:0:1 dev dn42-peer-klaus",
+  )
+
+  let pfx_v6 = IpPrefix(Ipv6(0xfdd4, 0xaf47, 0xdcfa, 0, 0, 0, 0, 0), 48)
+  let cmd_v6 =
+    unnumbered.format_kernel_unnumbered_route(
+      pfx_v6,
+      link_local,
+      "dn42-peer-klaus",
+    )
+  cmd_v6
+  |> should.equal(
+    "ip -6 route replace fdd4:af47:dcfa:0:0:0:0:0/48 via fe80:0:0:0:0:0:0:1 dev dn42-peer-klaus",
+  )
+
+  // Peer JSON serialization
+  let peer =
+    unnumbered.UnnumberedPeer(
+      interface: "dn42-peer-klaus",
+      remote_link_local: link_local,
+      local_link_local: Ipv6(0xfe80, 0, 0, 0, 0, 0, 0, 113),
+      peer_asn: 4_242_421_234,
+      extended_next_hop: True,
+      status: "ESTABLISHED",
+    )
+  let json_peers = unnumbered.unnumbered_peers_to_json([peer])
+  string.contains(json_peers, "dn42-peer-klaus") |> should.equal(True)
+  string.contains(json_peers, "4242421234") |> should.equal(True)
+  string.contains(json_peers, "ESTABLISHED") |> should.equal(True)
 }

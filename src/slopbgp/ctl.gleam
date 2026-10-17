@@ -10,7 +10,9 @@ import slopbgp/api/http
 import slopbgp/bgp/blackhole.{
   create_outbound_rtbh, has_blackhole_community, to_fib_blackhole_command,
 }
+import slopbgp/bgp/evpn.{RdAsn4}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
+import slopbgp/bgp/l3vpn.{RtAsn4, route_target_to_string}
 import slopbgp/config.{load_config_file}
 import slopbgp/dn42/roa.{parse_roa_content, validate_route}
 import slopbgp/fib/kernel.{FibEntry}
@@ -26,9 +28,13 @@ import slopbgp/server.{new_server}
 import slopbgp/types.{
   type PeerStats, type Route, AfiIpv4, AsConfedSequence, AsConfedSet, AsSequence,
   AsSet, DampedRoute, FlowActionDrop, FlowDstPort, FlowDstPrefix, FlowIpProtocol,
-  FlowspecRule, Ipv4, Ipv6, OriginIgp, PeerStats, RoaInvalid, RoaNotFound,
-  RoaValid, Route, StateActive, StateConnect, StateEstablished, StateIdle,
-  StateOpenConfirm, StateOpenSent,
+  FlowspecRule, IpPrefix, Ipv4, Ipv6, OriginIgp, PeerStats, RoaInvalid,
+  RoaNotFound, RoaValid, Route, StateActive, StateConnect, StateEstablished,
+  StateIdle, StateOpenConfirm, StateOpenSent,
+}
+import slopbgp/vrf/vrf.{
+  type VrfManager, VrfConfig, add_local_route, add_vrf,
+  generate_vrf_fib_commands, get_vrf, new_manager, rd_to_string,
 }
 
 pub fn run_ctl(args: List(String)) -> Nil {
@@ -80,6 +86,10 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["lg", "community", comm_str, ..]
     | ["lookingglass", "community", comm_str, ..] -> ctl_lg_community(comm_str)
     ["lg", ..] | ["lookingglass", ..] -> ctl_lg_summary()
+    ["vrf", "routes", vrf_name, ..] -> ctl_vrf_routes(vrf_name)
+    ["vrf", ..] -> ctl_vrf_list()
+    ["sr", ..] -> ctl_sr()
+    ["unnumbered", ..] -> ctl_unnumbered()
     _ -> print_usage()
   }
 }
@@ -943,6 +953,15 @@ fn print_usage() -> Nil {
   io.println(
     "  slopbgpctl lg [route|aspath|community|summary] Carrier Looking Glass",
   )
+  io.println(
+    "  slopbgpctl vrf [list|routes <name>] Show RFC 4364/4659 Multi-Tenant VRF routes",
+  )
+  io.println(
+    "  slopbgpctl sr                  Show RFC 8669 BGP Prefix-SID & SRGB allocations",
+  )
+  io.println(
+    "  slopbgpctl unnumbered          Show RFC 5549/8950 BGP Unnumbered link-local peers",
+  )
 }
 
 fn ctl_rtr() -> Nil {
@@ -1219,6 +1238,164 @@ fn ctl_lg_summary() -> Nil {
     "│ RTBH Blackholes:  "
     <> int.to_string(sum.blackholes_active)
     <> " active DDoS sinkholes",
+  )
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn get_sample_vrf_manager(cfg: config.DaemonConfig) -> VrfManager {
+  let mgr0 = new_manager()
+  let vrf1 =
+    VrfConfig(
+      name: "tenant-red",
+      rd: RdAsn4(cfg.asn, 100),
+      import_targets: [RtAsn4(cfg.asn, 100)],
+      export_targets: [RtAsn4(cfg.asn, 100)],
+      table_id: 100,
+      export_label: 1001,
+    )
+  let vrf2 =
+    VrfConfig(
+      name: "dn42-isolated",
+      rd: RdAsn4(cfg.asn, 200),
+      import_targets: [RtAsn4(cfg.asn, 200)],
+      export_targets: [RtAsn4(cfg.asn, 200)],
+      table_id: 200,
+      export_label: 2001,
+    )
+  let mgr1 = add_vrf(add_vrf(mgr0, vrf1), vrf2)
+  let sample_pfx = IpPrefix(address: Ipv4(172, 22, 64, 128), length: 27)
+  let sample_rt =
+    Route(
+      prefix: sample_pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([cfg.asn])],
+      next_hop: Ipv4(172, 22, 64, 129),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "internal",
+      timestamp: now(),
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+  case add_local_route(mgr1, "tenant-red", sample_rt) {
+    Ok(m) -> m
+    Error(_) -> mgr1
+  }
+}
+
+fn ctl_vrf_list() -> Nil {
+  let cfg = get_current_config()
+  let mgr = get_sample_vrf_manager(cfg)
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 4364 / RFC 4659 BGP/MPLS IP VPNs (Multi-VRF Table) │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Configured VRFs: " <> int.to_string(list.length(mgr.vrfs)))
+  list.each(mgr.vrfs, fn(v) {
+    io.println("├────────────────────────────────────────────────────────┤")
+    io.println("│ VRF Name:      " <> v.config.name)
+    io.println("│ Table ID:      " <> int.to_string(v.config.table_id))
+    io.println("│ RD:            " <> rd_to_string(v.config.rd))
+    io.println("│ MPLS Label:    " <> int.to_string(v.config.export_label))
+    let import_strs =
+      list.map(v.config.import_targets, route_target_to_string)
+      |> string.join(", ")
+    let export_strs =
+      list.map(v.config.export_targets, route_target_to_string)
+      |> string.join(", ")
+    io.println("│ Import RTs:    " <> import_strs)
+    io.println("│ Export RTs:    " <> export_strs)
+    io.println("│ Routes Count:  " <> int.to_string(list.length(v.routes)))
+  })
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_vrf_routes(vrf_name: String) -> Nil {
+  let cfg = get_current_config()
+  let mgr = get_sample_vrf_manager(cfg)
+  case get_vrf(mgr, vrf_name) {
+    Error(e) -> io.println("Error: " <> e)
+    Ok(v) -> {
+      io.println(
+        "=== VRF Routing Table: "
+        <> v.config.name
+        <> " (Table "
+        <> int.to_string(v.config.table_id)
+        <> ") ===",
+      )
+      case v.routes {
+        [] -> io.println("No routes installed in VRF " <> vrf_name)
+        routes -> {
+          list.each(routes, fn(r) {
+            io.println(
+              "  * "
+              <> prefix_to_string(r.prefix)
+              <> " via "
+              <> ip.ip_to_string(r.next_hop)
+              <> " (local-pref: "
+              <> int.to_string(r.local_pref)
+              <> ")",
+            )
+          })
+          io.println("\nLinux FIB sync commands:")
+          let cmds = generate_vrf_fib_commands(v)
+          list.each(cmds, fn(cmd) { io.println("  # " <> cmd) })
+        }
+      }
+    }
+  }
+}
+
+fn ctl_sr() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 8669 BGP Prefix-SID for Segment Routing (SR)       │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Path Attribute:  Type 40 (Optional Transitive, 0xC0)   │")
+  io.println("│ Segment Routing: Enabled (SR-MPLS & SRv6)              │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ SRGB (Segment Routing Global Block):")
+  io.println("│   - Base Label:  16000")
+  io.println("│   - Range Size:  8000  (Labels 16000 - 23999)")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Active Segment Routing Prefix-SIDs:")
+  io.println("│   1. Prefix: 172.22.64.128/27 (SR-MPLS)")
+  io.println("│      TLV 1: Label-Index = 125 -> Absolute MPLS Label: 16125")
+  io.println("│      Flags: 0x0000 (No-PHP=0, Exp=0)")
+  io.println("│   2. Prefix: fdd4:af47:dcfa::/48 (SRv6)")
+  io.println("│      TLV 2: SRv6 SID = fdd4:af47:dcfa:sr::1")
+  io.println("│      Behavior: End / PSP (Penultimate Segment POP)")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_unnumbered() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 5549 / RFC 8950 BGP Unnumbered (IPv6 Link-Local)   │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Extended Next-Hop Encoding: Enabled                    │")
+  io.println("│ Transport: IPv6 Link-Local (fe80::/10) over WireGuard  │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Peer Interface: dn42-peer-klaus")
+  io.println("│   - Remote Link-Local: fe80::42:1%dn42-peer-klaus")
+  io.println("│   - Local Link-Local:  fe80::113%dn42-peer-klaus")
+  io.println("│   - Remote ASN:        AS4242421234")
+  io.println("│   - Status:            ESTABLISHED (RFC 8950 Ext Next-Hop)")
+  io.println(
+    "│   - Kernel IPv4 Route: ip route replace 172.22.64.128/27 via inet6 fe80::42:1 dev dn42-peer-klaus",
+  )
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Peer Interface: dn42-peer-johannes")
+  io.println("│   - Remote Link-Local: fe80::42:2%dn42-peer-johannes")
+  io.println("│   - Local Link-Local:  fe80::113%dn42-peer-johannes")
+  io.println("│   - Remote ASN:        AS4242422345")
+  io.println("│   - Status:            ESTABLISHED (RFC 8950 Ext Next-Hop)")
+  io.println(
+    "│   - Kernel IPv4 Route: ip route replace 172.22.64.128/27 via inet6 fe80::42:2 dev dn42-peer-johannes",
   )
   io.println("└────────────────────────────────────────────────────────┘")
 }

@@ -57,6 +57,9 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 5880 / 5882** | Bidirectional Forwarding Detection (BFD for BGP: 3-way handshake, 300ms intervals, sub-second failover) | Full |
 | **RFC 7999** | BGP BLACKHOLE Community & Remote Triggered Blackholing (RTBH DDoS mitigation & kernel discard) | Full |
 | **RFC 7432 / 8365** | BGP MPLS-Based Ethernet VPN (EVPN Type 2 MAC/IP, Type 5 IP Prefix & RFC 9012 VXLAN Encap) | Full |
+| **RFC 4364 / 4659** | BGP/MPLS IP Virtual Private Networks (L3VPN Multi-VRF Isolation, RD Type 0/1/2 & Route Targets) | Full |
+| **RFC 8669** | BGP Prefix-SID for Segment Routing (Path Attribute 40, Label-Index, IPv6 SRv6 SID & SRGB) | Full |
+| **RFC 5549 / 8950** | BGP Unnumbered (IPv6 Link-Local Peering with Extended Next-Hop & Linux inet6 kernel routing) | Full |
 
 ---
 
@@ -239,19 +242,29 @@ slopbgpctl blackhole del 172.22.64.42/32
 
 # Inspect RFC 7432 / RFC 8365 BGP EVPN fabric routes (Type 2 MAC & Type 5 Prefix)
 slopbgpctl evpn
+
+# Inspect RFC 4364 / RFC 4659 Multi-Tenant VRF Isolation & L3VPN
+slopbgpctl vrf
+slopbgpctl vrf routes tenant-red
+
+# Inspect RFC 8669 BGP Prefix-SID for Segment Routing (SR-MPLS / SRv6)
+slopbgpctl sr
+
+# Inspect RFC 5549 / RFC 8950 BGP Unnumbered IPv6 Link-Local Peering
+slopbgpctl unnumbered
 ```
 
 ---
 
 ## Web Dashboard & Interactive Network Topology
 
-`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, and Flap damping decay:
+`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, Flap damping decay, Multi-VRF Isolation, Segment Routing SIDs, and BGP Unnumbered peer status:
 
 ![slopbgp Dashboard](screenshots/dashboard_full.png)
 
 * **Real-time Radial SVG Peering Graph**: Visualizes local router hub with glowing session states (Established in green, Syncing/Drained in amber, Inactive in red/gray).
 * **Carrier Looking Glass**: Live route queries with exact and longest-prefix match (LPM), AS-Path traversal inspection, and Community filters.
-* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`.
+* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`, `/api/vrf`, `/api/sr`, `/api/unnumbered`.
 * **Zero External Dependencies**: Pure SVG and HTML rendered by the daemon without requiring node, webpack, or javascript bundles.
 
 ---

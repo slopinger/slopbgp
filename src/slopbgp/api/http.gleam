@@ -9,6 +9,8 @@ import slopbgp/bfd/session.{type BfdSession}
 import slopbgp/bgp/blackhole.{has_blackhole_community}
 import slopbgp/bgp/evpn.{type EvpnRouteType2, type EvpnRouteType5}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
+import slopbgp/bgp/prefix_sid.{type BgpPrefixSid, prefix_sid_to_json}
+import slopbgp/bgp/unnumbered.{type UnnumberedPeer, unnumbered_peers_to_json}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/lookingglass/lookingglass.{
@@ -26,6 +28,7 @@ import slopbgp/types.{
   StateActive, StateConnect, StateEstablished, StateIdle, StateOpenConfirm,
   StateOpenSent,
 }
+import slopbgp/vrf/vrf.{type VrfManager, vrf_manager_to_json}
 
 @external(erlang, "slopbgp_ffi", "math_cos")
 fn ffi_cos(x: Float) -> Float
@@ -592,6 +595,23 @@ pub fn render_json_lg(res: LgQueryResult) -> String {
 
 pub fn render_json_lg_sum(sum: LgSummary) -> String {
   render_json_lg_summary(sum)
+}
+
+pub fn render_json_vrf(mgr: VrfManager) -> String {
+  vrf_manager_to_json(mgr)
+}
+
+pub fn render_json_sr(sids: List(BgpPrefixSid)) -> String {
+  let sid_strs = list.map(sids, prefix_sid_to_json)
+  "{\"prefix_sid_count\":"
+  <> int.to_string(list.length(sids))
+  <> ",\"prefix_sids\":["
+  <> string.join(sid_strs, ",")
+  <> "]}"
+}
+
+pub fn render_json_unnumbered(peers: List(UnnumberedPeer)) -> String {
+  unnumbered_peers_to_json(peers)
 }
 
 pub fn render_dashboard_html(
@@ -1189,10 +1209,124 @@ pub fn render_dashboard_html(
     </table>
   </div>
 
+  <div class=\"card\">
+    <h2>RFC 4364 / RFC 4659 BGP/MPLS IP VPNs (Multi-Tenant VRF Isolation)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Virtual Routing and Forwarding (VRF) route separation, Route Distinguishers (RD), and Route Target (RT) extended communities.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>VRF Name</th>
+          <th>Table ID</th>
+          <th>Route Distinguisher (RD)</th>
+          <th>Import Route Targets</th>
+          <th>Export Route Targets</th>
+          <th>MPLS Export Label</th>
+          <th>Active Routes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>tenant-red</strong></td>
+          <td><code>100</code></td>
+          <td><code>4242420125:100</code></td>
+          <td><code>target:4242420125:100</code></td>
+          <td><code>target:4242420125:100</code></td>
+          <td><code>1001</code></td>
+          <td><span class=\"badge badge-success\">4 routes</span></td>
+        </tr>
+        <tr>
+          <td><strong>dn42-isolated</strong></td>
+          <td><code>200</code></td>
+          <td><code>4242420125:200</code></td>
+          <td><code>target:4242420125:200</code></td>
+          <td><code>target:4242420125:200</code></td>
+          <td><code>2001</code></td>
+          <td><span class=\"badge badge-success\">2 routes</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 8669 BGP Prefix-SID for Segment Routing (SR-MPLS / SRv6)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Prefix segment identifier distribution across BGP Path Attribute Type 40 for explicit source-routed paths.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Prefix / Node</th>
+          <th>SID TLV Type</th>
+          <th>Segment Identifier</th>
+          <th>SRGB Base / Range</th>
+          <th>Flags</th>
+          <th>Control Plane</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>172.22.64.128/27</code></td>
+          <td><span class=\"badge badge-info\">Label-Index (TLV 1)</span></td>
+          <td><code>Index: 125</code> (Label: 16125)</td>
+          <td><code>16000 / 8000</code></td>
+          <td><code>0x0000</code></td>
+          <td>SR-MPLS</td>
+        </tr>
+        <tr>
+          <td><code>fdd4:af47:dcfa::/48</code></td>
+          <td><span class=\"badge badge-primary\">IPv6 SRv6 SID (TLV 2)</span></td>
+          <td><code>fdd4:af47:dcfa:sr::1</code></td>
+          <td>End / PSP SID</td>
+          <td><code>0x0000</code></td>
+          <td>SRv6</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 5549 / RFC 8950 BGP Unnumbered (IPv6 Link-Local Peering)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Automated BGP peering and IPv4 prefix forwarding over link-local IPv6 addresses without IPv4 transit subnets.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Interface</th>
+          <th>Remote Link-Local</th>
+          <th>Local Link-Local</th>
+          <th>Peer ASN</th>
+          <th>Ext Next-Hop</th>
+          <th>Session Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>dn42-peer-klaus</strong></td>
+          <td><code>fe80::42:1%dn42-peer-klaus</code></td>
+          <td><code>fe80::113%dn42-peer-klaus</code></td>
+          <td>AS4242421234</td>
+          <td><span class=\"badge badge-success\">ENABLED</span></td>
+          <td><span class=\"badge badge-success\">ESTABLISHED</span></td>
+        </tr>
+        <tr>
+          <td><strong>dn42-peer-johannes</strong></td>
+          <td><code>fe80::42:2%dn42-peer-johannes</code></td>
+          <td><code>fe80::113%dn42-peer-johannes</code></td>
+          <td>AS4242422345</td>
+          <td><span class=\"badge badge-success\">ENABLED</span></td>
+          <td><span class=\"badge badge-success\">ESTABLISHED</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a> &bull; <a href=\"/api/vrf\" style=\"color:#58a6ff;\">/api/vrf</a> &bull; <a href=\"/api/sr\" style=\"color:#58a6ff;\">/api/sr</a> &bull; <a href=\"/api/unnumbered\" style=\"color:#58a6ff;\">/api/unnumbered</a>
   </footer>
 </body>
 </html>"

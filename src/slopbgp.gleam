@@ -55,7 +55,10 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["blackhole", ..]
     | ["evpn", ..]
     | ["lg", ..]
-    | ["lookingglass", ..] -> run_ctl(args)
+    | ["lookingglass", ..]
+    | ["vrf", ..]
+    | ["sr", ..]
+    | ["unnumbered", ..] -> run_ctl(args)
     ["daemon", ..] | [] -> run_daemon()
     _ -> {
       io.println(
