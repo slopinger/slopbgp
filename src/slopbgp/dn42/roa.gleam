@@ -5,8 +5,9 @@ import gleam/result
 import gleam/string
 import slopbgp/ip.{is_prefix_contained, parse_prefix}
 import slopbgp/types.{
-  type AsPathSegment, type IpPrefix, type RoaEntry, type RoaStatus, AsSequence,
-  AsSet, RoaEntry, RoaInvalid, RoaNotFound, RoaValid,
+  type AsPathSegment, type IpPrefix, type RoaEntry, type RoaStatus,
+  AsConfedSequence, AsConfedSet, AsSequence, AsSet, RoaEntry, RoaInvalid,
+  RoaNotFound, RoaValid,
 }
 
 pub fn parse_roa_line(line: String) -> Result(RoaEntry, String) {
@@ -46,12 +47,12 @@ pub fn extract_origin_asn(as_path: List(AsPathSegment)) -> Option(Int) {
     [] -> None
     [last_seg, ..] ->
       case last_seg {
-        AsSequence(asns) ->
+        AsSequence(asns) | AsConfedSequence(asns) ->
           case list.reverse(asns) {
             [last_as, ..] -> Some(last_as)
             [] -> None
           }
-        AsSet(asns) ->
+        AsSet(asns) | AsConfedSet(asns) ->
           case asns {
             [first_as, ..] -> Some(first_as)
             [] -> None

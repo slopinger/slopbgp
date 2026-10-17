@@ -54,6 +54,8 @@ pub type Origin {
 pub type AsPathSegment {
   AsSequence(List(Int))
   AsSet(List(Int))
+  AsConfedSequence(List(Int))
+  AsConfedSet(List(Int))
 }
 
 pub type Community {
@@ -77,6 +79,8 @@ pub type PathAttribute {
   AttrAtomicAggregate
   AttrAggregator(asn: Int, router_id: IpAddress)
   AttrCommunities(List(Community))
+  AttrOriginatorId(IpAddress)
+  AttrClusterList(List(IpAddress))
   AttrMpReachNlri(
     afi: Afi,
     safi: Safi,
@@ -144,6 +148,8 @@ pub type Route {
     peer_id: String,
     timestamp: Int,
     path_id: Option(Int),
+    originator_id: Option(IpAddress),
+    cluster_list: List(IpAddress),
   )
 }
 
@@ -171,6 +177,8 @@ pub type PeerConfig {
     import_filters: List(String),
     export_filters: List(String),
     route_server_client: Bool,
+    route_reflector_client: Bool,
+    confederation_member: Bool,
   )
 }
 

@@ -16,12 +16,13 @@ import slopbgp/net/socket.{type Socket, close, connect, send}
 import slopbgp/types.{
   type BgpCapability, type BgpMessage, type IpAddress, type IpPrefix,
   type PeerConfig, type PeerStats, type RoaEntry, type Route, AfiIpv4, AfiIpv6,
-  AttrAsPath, AttrCommunities, AttrExtendedCommunities, AttrLargeCommunities,
-  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrMpUnreachNlri, AttrNextHop,
-  AttrOnlyToCustomer, AttrOrigin, CapAddPath, CapEnhancedRouteRefresh,
-  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapGracefulRestart,
-  CapMultiProtocol, CapRouteRefresh, MsgUpdate, OriginIncomplete, PeerStats,
-  RoaNotFound, Route, SafiUnicast, StateIdle,
+  AttrAsPath, AttrClusterList, AttrCommunities, AttrExtendedCommunities,
+  AttrLargeCommunities, AttrLocalPref, AttrMed, AttrMpReachNlri,
+  AttrMpUnreachNlri, AttrNextHop, AttrOnlyToCustomer, AttrOrigin,
+  AttrOriginatorId, CapAddPath, CapEnhancedRouteRefresh, CapExtendedMessage,
+  CapExtendedNextHop, CapFourOctetAsn, CapGracefulRestart, CapMultiProtocol,
+  CapRouteRefresh, MsgUpdate, OriginIncomplete, PeerStats, RoaNotFound, Route,
+  SafiUnicast, StateIdle,
 }
 
 pub type PeerHandle {
@@ -368,6 +369,27 @@ pub fn extract_routes_from_update(
         })
         |> option.from_result
 
+      let originator_id =
+        list.find_map(attrs, fn(a) {
+          case a {
+            AttrOriginatorId(id) -> Ok(id)
+            _ -> Error(Nil)
+          }
+        })
+        |> option.from_result
+
+      let cluster_list = case
+        list.find_map(attrs, fn(a) {
+          case a {
+            AttrClusterList(cls) -> Ok(cls)
+            _ -> Error(Nil)
+          }
+        })
+      {
+        Ok(cls) -> cls
+        Error(_) -> []
+      }
+
       let origin_asn = extract_origin_asn(as_path)
 
       // 1. Process standard IPv4 NLRI
@@ -396,6 +418,8 @@ pub fn extract_routes_from_update(
                 peer_id: peer_id,
                 timestamp: now_time,
                 path_id: None,
+                originator_id: originator_id,
+                cluster_list: cluster_list,
               ))
             }
           }
@@ -435,6 +459,8 @@ pub fn extract_routes_from_update(
                         peer_id: peer_id,
                         timestamp: now_time,
                         path_id: None,
+                        originator_id: originator_id,
+                        cluster_list: cluster_list,
                       ))
                     }
                   }

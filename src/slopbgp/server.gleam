@@ -1,8 +1,9 @@
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{None, Some, unwrap}
 import simplifile
+import slopbgp/bgp/confederation
 import slopbgp/bgp/damping.{
   type DampingTable, default_damping_config,
   get_damped_routes as damping_get_damped, new_table as new_damping_table,
@@ -11,6 +12,7 @@ import slopbgp/bgp/damping.{
 import slopbgp/bgp/fsm.{EventHoldTimerExpires, EventKeepaliveTimerExpires}
 import slopbgp/bgp/graceful_shutdown.{apply_graceful_shutdown_outbound}
 import slopbgp/bgp/message.{encode_message}
+import slopbgp/bgp/routereflector
 import slopbgp/config.{type DaemonConfig}
 import slopbgp/dn42/roa.{parse_roa_content}
 import slopbgp/fib/kernel.{type FibEntry, type FibState, new_fib, sync_fib}
@@ -29,8 +31,9 @@ import slopbgp/routeserver/routeserver
 import slopbgp/types.{
   type BgpMessage, type DampedRoute, type DampingConfig, type FlowspecRule,
   type PeerConfig, type PeerStats, type PolicyChain, type RoaEntry, type Route,
-  AttrAsPath, AttrCommunities, AttrLargeCommunities, AttrLocalPref, AttrMed,
-  AttrNextHop, AttrOrigin, MsgUpdate, PeerStats, StateEstablished,
+  AttrAsPath, AttrClusterList, AttrCommunities, AttrLargeCommunities,
+  AttrLocalPref, AttrMed, AttrNextHop, AttrOrigin, AttrOriginatorId, MsgUpdate,
+  PeerStats, StateEstablished,
 }
 
 pub type ServerState {
@@ -308,54 +311,131 @@ fn propagate_routes_to_peers(
                 let target_is_drained =
                   list.contains(acc.drained_peers, target_peer_id)
 
-                // Prepare outbound routes for this peer (RFC 7947 Route Server or standard eBGP/iBGP)
-                let outbound_routes =
-                  list.filter_map(routes_to_send, fn(r) {
-                    let maybe_prepared = case
-                      target_peer.config.route_server_client
-                    {
-                      True ->
-                        routeserver.prepare_routeserver_outbound_route(
-                          r,
-                          target_peer.config.remote_as,
-                          target_peer.config.local_as,
-                        )
-                      False ->
-                        prepare_outbound_route(
-                          r,
-                          target_peer.config,
-                          target_peer.config.local_ip,
-                        )
-                    }
+                let is_ibgp =
+                  target_peer.config.local_as == target_peer.config.remote_as
+                let sender_opt = dict.get(state.peers, origin_peer_id)
+                let sender_is_client = case sender_opt {
+                  Ok(p) -> p.config.route_reflector_client
+                  Error(_) -> False
+                }
+                let sender_is_ebgp = case sender_opt {
+                  Ok(p) -> p.config.local_as != p.config.remote_as
+                  Error(_) -> True
+                }
 
-                    case maybe_prepared {
-                      Some(prepared) -> {
-                        // RFC 8326 Graceful Shutdown: attach community & drop local_pref if drained
-                        case target_is_drained {
-                          True -> Ok(apply_graceful_shutdown_outbound(prepared))
-                          False -> Ok(prepared)
-                        }
-                      }
-                      None -> Error(Nil)
+                // Check Route Reflector permission for iBGP sessions (RFC 4456)
+                let rr_permitted = case is_ibgp {
+                  False -> True
+                  True ->
+                    case state.config.cluster_id {
+                      Some(_) ->
+                        routereflector.should_reflect_to_peer(
+                          sender_is_client,
+                          target_peer.config.route_reflector_client,
+                          sender_is_ebgp,
+                        )
+                      None -> True
                     }
-                  })
+                }
+
+                // Prepare outbound routes for this peer
+                let outbound_routes = case rr_permitted {
+                  False -> []
+                  True ->
+                    list.filter_map(routes_to_send, fn(r) {
+                      let maybe_prepared = case
+                        target_peer.config.route_server_client
+                      {
+                        True ->
+                          routeserver.prepare_routeserver_outbound_route(
+                            r,
+                            target_peer.config.remote_as,
+                            target_peer.config.local_as,
+                          )
+                        False ->
+                          case target_peer.config.confederation_member {
+                            True -> {
+                              let confed_id =
+                                unwrap(
+                                  state.config.confederation_id,
+                                  target_peer.config.local_as,
+                                )
+                              Some(confederation.prepare_confed_outbound_route(
+                                r,
+                                True,
+                                target_peer.config.local_as,
+                                confed_id,
+                                target_peer.config.local_ip,
+                              ))
+                            }
+                            False -> {
+                              let p_out =
+                                prepare_outbound_route(
+                                  r,
+                                  target_peer.config,
+                                  target_peer.config.local_ip,
+                                )
+                              case p_out {
+                                Some(out_r) ->
+                                  case is_ibgp, state.config.cluster_id {
+                                    True, Some(cid) -> {
+                                      let sender_r_id = case sender_opt {
+                                        Ok(sp) -> sp.config.remote_ip
+                                        Error(_) -> target_peer.config.local_ip
+                                      }
+                                      Some(routereflector.reflect_route(
+                                        out_r,
+                                        cid,
+                                        sender_r_id,
+                                      ))
+                                    }
+                                    _, _ -> Some(out_r)
+                                  }
+                                None -> None
+                              }
+                            }
+                          }
+                      }
+
+                      case maybe_prepared {
+                        Some(prepared) -> {
+                          // RFC 8326 Graceful Shutdown: attach community & drop local_pref if drained
+                          case target_is_drained {
+                            True ->
+                              Ok(apply_graceful_shutdown_outbound(prepared))
+                            False -> Ok(prepared)
+                          }
+                        }
+                        None -> Error(Nil)
+                      }
+                    })
+                }
 
                 case outbound_routes {
                   [] -> acc
                   [first, ..] -> {
                     // Group routes by path attributes and send UPDATE
+                    let base_attrs = [
+                      AttrOrigin(first.origin),
+                      AttrAsPath(first.as_path),
+                      AttrNextHop(first.next_hop),
+                      AttrMed(first.med),
+                      AttrLocalPref(first.local_pref),
+                      AttrCommunities(first.communities),
+                      AttrLargeCommunities(first.large_communities),
+                    ]
+                    let attrs_with_orig = case first.originator_id {
+                      Some(oid) -> [AttrOriginatorId(oid), ..base_attrs]
+                      None -> base_attrs
+                    }
+                    let final_attrs = case first.cluster_list {
+                      [] -> attrs_with_orig
+                      cls -> [AttrClusterList(cls), ..attrs_with_orig]
+                    }
                     let update =
                       MsgUpdate(
                         withdrawn: [],
-                        attributes: [
-                          AttrOrigin(first.origin),
-                          AttrAsPath(first.as_path),
-                          AttrNextHop(first.next_hop),
-                          AttrMed(first.med),
-                          AttrLocalPref(first.local_pref),
-                          AttrCommunities(first.communities),
-                          AttrLargeCommunities(first.large_communities),
-                        ],
+                        attributes: final_attrs,
                         nlri: list.map(outbound_routes, fn(r) { r.prefix }),
                       )
                     let msg_bytes = encode_message(update)

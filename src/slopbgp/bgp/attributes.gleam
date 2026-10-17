@@ -12,12 +12,13 @@ import slopbgp/ip.{
 import slopbgp/types.{
   type Afi, type AsPathSegment, type Community, type ExtendedCommunity,
   type IpAddress, type IpPrefix, type LargeCommunity, type Origin,
-  type PathAttribute, type Safi, AfiIpv4, AfiIpv6, AsSequence, AsSet,
-  AttrAggregator, AttrAsPath, AttrAtomicAggregate, AttrCommunities,
-  AttrExtendedCommunities, AttrLargeCommunities, AttrLocalPref, AttrMed,
-  AttrMpReachNlri, AttrMpUnreachNlri, AttrNextHop, AttrOnlyToCustomer,
-  AttrOrigin, AttrUnknown, Community, ExtCommunity, Ipv4, Ipv6, LargeCommunity,
-  OriginEgp, OriginIgp, OriginIncomplete,
+  type PathAttribute, type Safi, AfiIpv4, AfiIpv6, AsConfedSequence, AsConfedSet,
+  AsSequence, AsSet, AttrAggregator, AttrAsPath, AttrAtomicAggregate,
+  AttrClusterList, AttrCommunities, AttrExtendedCommunities,
+  AttrLargeCommunities, AttrLocalPref, AttrMed, AttrMpReachNlri,
+  AttrMpUnreachNlri, AttrNextHop, AttrOnlyToCustomer, AttrOrigin,
+  AttrOriginatorId, AttrUnknown, Community, ExtCommunity, Ipv4, Ipv6,
+  LargeCommunity, OriginEgp, OriginIgp, OriginIncomplete,
 }
 
 pub fn encode_origin(origin: Origin) -> BitArray {
@@ -44,6 +45,18 @@ pub fn encode_as_path(segments: List(AsPathSegment)) -> BitArray {
           let asn_bin =
             list.fold(asns, <<>>, fn(acc, asn) { <<acc:bits, asn:32>> })
           <<1:8, count:8, asn_bin:bits>>
+        }
+        AsConfedSequence(asns) -> {
+          let count = list.length(asns)
+          let asn_bin =
+            list.fold(asns, <<>>, fn(acc, asn) { <<acc:bits, asn:32>> })
+          <<3:8, count:8, asn_bin:bits>>
+        }
+        AsConfedSet(asns) -> {
+          let count = list.length(asns)
+          let asn_bin =
+            list.fold(asns, <<>>, fn(acc, asn) { <<acc:bits, asn:32>> })
+          <<4:8, count:8, asn_bin:bits>>
         }
       }
     })
@@ -85,6 +98,26 @@ pub fn encode_communities(communities: List(Community)) -> BitArray {
       let comm_bins = list.map(communities, fn(c) { <<c.asn:16, c.value:16>> })
       let val = list.fold(comm_bins, <<>>, fn(acc, b) { <<acc:bits, b:bits>> })
       encode_attribute(0xC0, 8, val)
+    }
+  }
+}
+
+pub fn encode_originator_id(ip: IpAddress) -> BitArray {
+  case ip {
+    Ipv4(a, b, c, d) -> encode_attribute(0x80, 9, <<a:8, b:8, c:8, d:8>>)
+    _ -> <<>>
+  }
+}
+
+pub fn encode_cluster_list(clusters: List(IpAddress)) -> BitArray {
+  case clusters {
+    [] -> <<>>
+    _ -> {
+      let cluster_bytes =
+        list.fold(clusters, <<>>, fn(acc, c) {
+          <<acc:bits, { ip_to_bytes(c) }:bits>>
+        })
+      encode_attribute(0x80, 10, cluster_bytes)
     }
   }
 }
@@ -176,6 +209,8 @@ pub fn encode_path_attribute(attr: PathAttribute) -> BitArray {
     AttrAtomicAggregate -> encode_atomic_aggregate()
     AttrAggregator(asn, r_id) -> encode_aggregator(asn, r_id)
     AttrCommunities(comms) -> encode_communities(comms)
+    AttrOriginatorId(id) -> encode_originator_id(id)
+    AttrClusterList(cls) -> encode_cluster_list(cls)
     AttrMpReachNlri(afi, safi, nhs, nlri) ->
       encode_mp_reach(afi, safi, nhs, nlri)
     AttrMpUnreachNlri(afi, safi, w) -> encode_mp_unreach(afi, safi, w)
@@ -291,6 +326,15 @@ fn decode_single_attribute(
       let comms = decode_communities_data(data, [])
       AttrCommunities(comms)
     }
+    9 ->
+      case bytes_to_ipv4(data) {
+        Ok(ip) -> AttrOriginatorId(ip)
+        Error(_) -> AttrUnknown(flags, type_code, data)
+      }
+    10 -> {
+      let clusters = decode_cluster_list_data(data, [])
+      AttrClusterList(clusters)
+    }
     14 ->
       case decode_mp_reach_data(data, has_add_path) {
         Ok(attr) -> attr
@@ -328,10 +372,24 @@ fn decode_as_path_segments(
       let #(asns, rem) = decode_asns(rest, count, [])
       let seg = case seg_type {
         1 -> AsSet(asns)
+        2 -> AsSequence(asns)
+        3 -> AsConfedSequence(asns)
+        4 -> AsConfedSet(asns)
         _ -> AsSequence(asns)
       }
       decode_as_path_segments(rem, [seg, ..acc])
     }
+    _ -> list.reverse(acc)
+  }
+}
+
+fn decode_cluster_list_data(
+  data: BitArray,
+  acc: List(IpAddress),
+) -> List(IpAddress) {
+  case data {
+    <<a:8, b:8, c:8, d:8, rest:bits>> ->
+      decode_cluster_list_data(rest, [Ipv4(a, b, c, d), ..acc])
     _ -> list.reverse(acc)
   }
 }

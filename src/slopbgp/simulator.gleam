@@ -64,6 +64,8 @@ pub fn run_simulation() -> Result(Nil, String) {
       import_filters: [],
       export_filters: [],
       route_server_client: False,
+      route_reflector_client: False,
+      confederation_member: False,
     )
 
   let srv = server.add_peer(new_server(cfg), peer_cfg)
@@ -297,5 +299,7 @@ fn make_dummy_route(pfx: types.IpPrefix) -> Route {
     peer_id: "test",
     timestamp: 0,
     path_id: None,
+    originator_id: None,
+    cluster_list: [],
   )
 }

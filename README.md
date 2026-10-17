@@ -50,6 +50,9 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 8956** | Dissemination of Flow Specification Rules for IPv6 (Next Header, Flow Label, offset encoding) | Full |
 | **RFC 7854** | BGP Monitoring Protocol (BMP v3: Route Monitoring, Stats, Peer Up/Down, Initiation TLVs) | Full |
 | **RFC 7947 / 7948** | Internet Exchange Point (IXP) Route Server (Transparent AS_PATH, NEXT_HOP & Community Matrix) | Full |
+| **RFC 4456** | BGP Route Reflection (ORIGINATOR_ID, CLUSTER_LIST loop prevention & reflection rules) | Full |
+| **RFC 5065** | Autonomous System Confederations for BGP (AS_CONFED_SEQUENCE, AS_CONFED_SET & boundary stripping) | Full |
+| **RFC 8212** | Default External BGP (eBGP) Route Propagation Behavior without Policies (Default-Deny) | Full |
 
 ---
 
@@ -70,16 +73,18 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 
 ## Routing Information Base (Loc-RIB)
 
-The decision engine chooses the best path using an 8-stage tie-breaking algorithm:
+The decision engine chooses the best path using a 10-stage tie-breaking algorithm:
 
-1. **ROA Validation**: `VALID` beats `NOT_FOUND`, both beat `INVALID`.
+1. **ROA Validation**: `VALID` beats `NOT_FOUND`, both beat `INVALID` (RFC 6811).
 2. **Local Preference**: Highest `local_pref` (default 100).
-3. **AS_PATH Length**: Shortest path (counting `AS_SEQUENCE` members and `AS_SET` groups).
+3. **AS_PATH Length**: Shortest path (counting `AS_SEQUENCE` and `AS_SET`; confederation segments excluded per RFC 5065).
 4. **Origin**: `IGP` (0) < `EGP` (1) < `INCOMPLETE` (2).
 5. **MED**: Lowest Multi-Exit Discriminator when from the same neighbor AS.
 6. **Peering Type**: Prefer eBGP over iBGP.
 7. **DN42 Latency Metric**: Prefer lower latency community (`64511:1` over `64511:9`).
-8. **Tie-Breaker**: Lowest peer identifier / earliest timestamp.
+8. **Route Reflection CLUSTER_LIST**: Shorter `CLUSTER_LIST` length preferred (RFC 4456).
+9. **ORIGINATOR_ID / Router ID**: Lowest `ORIGINATOR_ID` or BGP Identifier (RFC 4456).
+10. **Tie-Breaker**: Lowest peer identifier / earliest timestamp.
 
 ---
 
@@ -186,6 +191,18 @@ slopbgpctl bmp
 # Inspect RFC 7947/7948 IXP Route Server status & clients
 slopbgpctl routeserver
 
+# Inspect RFC 4456 Route Reflector status & clients
+slopbgpctl rr
+
+# Inspect RFC 5065 BGP Confederation status & member peers
+slopbgpctl confed
+
+# Render Autonomous Peering Topology Graph
+slopbgpctl topology
+
+# Export full Web Dashboard HTML with SVG topology
+slopbgpctl dashboard /srv/http/dashboard.html
+
 # Inspect configured routing policies
 slopbgpctl policy
 
@@ -199,6 +216,18 @@ slopbgpctl roa check 172.22.64.128/27 4242420125
 slopbgpctl roa check 172.22.64.128/27 999999
 # Result: INVALID (Origin AS999999 NOT authorized or exceeds max-length)
 ```
+
+---
+
+## Web Dashboard & Interactive Network Topology
+
+`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, and Flap damping decay:
+
+![slopbgp Dashboard](screenshots/dashboard_full.png)
+
+* **Real-time Radial SVG Peering Graph**: Visualizes local router hub with glowing session states (Established in green, Syncing/Drained in amber, Inactive in red/gray).
+* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`.
+* **Zero External Dependencies**: Pure SVG and HTML rendered by the daemon without requiring node, webpack, or javascript bundles.
 
 ---
 

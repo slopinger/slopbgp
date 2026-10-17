@@ -6,9 +6,10 @@ import slopbgp/types.{
   type PolicyAction, type PolicyChain, type PolicyMatch, type PolicyRule,
   type Route, ActionAccept, ActionAddCommunity, ActionAddLargeCommunity,
   ActionPrependAs, ActionReject, ActionRemoveCommunity, ActionSetLocalPref,
-  ActionSetMed, ActionSetNextHop, AsSequence, AsSet, MatchAny, MatchAsLength,
-  MatchAsPathContains, MatchAsPathOrigin, MatchCommunity, MatchLargeCommunity,
-  MatchPrefix, MatchRoa, PolicyChain, PolicyRule, RoaInvalid, Route,
+  ActionSetMed, ActionSetNextHop, AsConfedSequence, AsConfedSet, AsSequence,
+  AsSet, MatchAny, MatchAsLength, MatchAsPathContains, MatchAsPathOrigin,
+  MatchCommunity, MatchLargeCommunity, MatchPrefix, MatchRoa, PolicyChain,
+  PolicyRule, RoaInvalid, Route,
 }
 
 /// Check if a single rule match condition matches a route
@@ -24,6 +25,8 @@ pub fn matches_condition(route: Route, match_cond: PolicyMatch) -> Bool {
         case seg {
           AsSequence(asns) -> list.contains(asns, target_asn)
           AsSet(asns) -> list.contains(asns, target_asn)
+          AsConfedSequence(asns) -> list.contains(asns, target_asn)
+          AsConfedSet(asns) -> list.contains(asns, target_asn)
         }
       })
     }
@@ -44,6 +47,8 @@ pub fn matches_condition(route: Route, match_cond: PolicyMatch) -> Bool {
           case seg {
             AsSequence(asns) -> acc + list.length(asns)
             AsSet(_) -> acc + 1
+            AsConfedSequence(_) -> acc
+            AsConfedSet(_) -> acc
           }
         })
       total_len <= max_length

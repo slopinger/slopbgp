@@ -43,6 +43,10 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["reload", ..]
     | ["bmp", ..]
     | ["routeserver", ..]
+    | ["rr", ..]
+    | ["confed", ..]
+    | ["topology", ..]
+    | ["dashboard", ..]
     | ["metrics", ..]
     | ["policy", ..]
     | ["roa", ..] -> run_ctl(args)

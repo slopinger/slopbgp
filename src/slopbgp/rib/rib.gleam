@@ -6,11 +6,12 @@ import gleam/string
 import slopbgp/dn42/communities.{
   extract_dn42_latency, has_no_advertise, has_no_export,
 }
-import slopbgp/ip.{prefix_to_string}
+import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/types.{
   type AsPathSegment, type IpAddress, type IpPrefix, type PeerConfig,
-  type RoaStatus, type Route, AsSequence, AsSet, OriginEgp, OriginIgp,
-  OriginIncomplete, RoaInvalid, RoaNotFound, RoaValid, Route,
+  type RoaStatus, type Route, AsConfedSequence, AsConfedSet, AsSequence, AsSet,
+  OriginEgp, OriginIgp, OriginIncomplete, RoaInvalid, RoaNotFound, RoaValid,
+  Route,
 }
 
 pub type Rib {
@@ -183,11 +184,31 @@ pub fn compare_routes(a: Route, b: Route) -> Bool {
                         Some(_), None -> True
                         None, Some(_) -> False
                         _, _ -> {
-                          // 7. Earliest timestamp / lowest peer_id
-                          case a.timestamp != b.timestamp {
-                            True -> a.timestamp < b.timestamp
-                            False ->
-                              string.compare(a.peer_id, b.peer_id) == order.Lt
+                          // 7. Route Reflector tie-breaker (RFC 4456 Section 9): shortest cluster_list
+                          let cl_len_a = list.length(a.cluster_list)
+                          let cl_len_b = list.length(b.cluster_list)
+                          case cl_len_a != cl_len_b {
+                            True -> cl_len_a < cl_len_b
+                            False -> {
+                              // 8. Lowest originator_id if present
+                              let orig_id_cmp =
+                                compare_originator_ids(
+                                  a.originator_id,
+                                  b.originator_id,
+                                )
+                              case orig_id_cmp {
+                                Some(pref) -> pref
+                                None -> {
+                                  // 9. Earliest timestamp / lowest peer_id
+                                  case a.timestamp != b.timestamp {
+                                    True -> a.timestamp < b.timestamp
+                                    False ->
+                                      string.compare(a.peer_id, b.peer_id)
+                                      == order.Lt
+                                  }
+                                }
+                              }
+                            }
                           }
                         }
                       }
@@ -200,6 +221,19 @@ pub fn compare_routes(a: Route, b: Route) -> Bool {
         }
       }
     }
+  }
+}
+
+fn compare_originator_ids(
+  a: Option(IpAddress),
+  b: Option(IpAddress),
+) -> Option(Bool) {
+  case a, b {
+    Some(ia), Some(ib) if ia != ib ->
+      Some(string.compare(ip_to_string(ia), ip_to_string(ib)) == order.Lt)
+    Some(_), None -> Some(True)
+    None, Some(_) -> Some(False)
+    _, _ -> None
   }
 }
 
@@ -220,6 +254,8 @@ pub fn as_path_length(as_path: List(AsPathSegment)) -> Int {
     case seg {
       AsSequence(asns) -> acc + list.length(asns)
       AsSet(_) -> acc + 1
+      AsConfedSequence(_) -> acc
+      AsConfedSet(_) -> acc
     }
   })
 }
@@ -241,7 +277,10 @@ pub fn prepare_outbound_route(
   let contains_peer_as =
     list.any(route.as_path, fn(seg) {
       case seg {
-        AsSequence(asns) | AsSet(asns) -> list.contains(asns, peer.remote_as)
+        AsSequence(asns)
+        | AsSet(asns)
+        | AsConfedSequence(asns)
+        | AsConfedSet(asns) -> list.contains(asns, peer.remote_as)
       }
     })
 

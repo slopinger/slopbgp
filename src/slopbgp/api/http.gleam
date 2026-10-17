@@ -2,17 +2,24 @@ import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/types.{
-  type DampedRoute, type FlowspecRule, type PeerConfig, type PeerStats,
-  type Route, AsSequence, AsSet, OriginEgp, OriginIgp, OriginIncomplete,
-  RoaInvalid, RoaNotFound, RoaValid, StateActive, StateConnect, StateEstablished,
-  StateIdle, StateOpenConfirm, StateOpenSent,
+  type DampedRoute, type FlowspecRule, type IpAddress, type PeerConfig,
+  type PeerStats, type Route, AsConfedSequence, AsConfedSet, AsSequence, AsSet,
+  OriginEgp, OriginIgp, OriginIncomplete, RoaInvalid, RoaNotFound, RoaValid,
+  StateActive, StateConnect, StateEstablished, StateIdle, StateOpenConfirm,
+  StateOpenSent,
 }
+
+@external(erlang, "slopbgp_ffi", "math_cos")
+fn ffi_cos(x: Float) -> Float
+
+@external(erlang, "slopbgp_ffi", "math_sin")
+fn ffi_sin(x: Float) -> Float
 
 pub fn render_json_status(
   asn: Int,
@@ -181,6 +188,261 @@ pub fn render_json_bmp(peers: List(PeerConfig)) -> String {
     #("rfc", json.string("RFC 7854")),
     #("monitoring_active", json.bool(True)),
     #("feeds", json.preprocessed_array(feed_objects)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_topology_svg(
+  asn: Int,
+  router_id: String,
+  peers: List(PeerStats),
+) -> String {
+  let cx = 440.0
+  let cy = 210.0
+  let r_orbit = 145.0
+  let total_peers = list.length(peers)
+
+  let #(links_svg, nodes_svg) = case total_peers {
+    0 -> #(
+      "",
+      "<text x='440' y='270' fill='#8b949e' text-anchor='middle' font-size='12'>No active BGP peering sessions</text>",
+    )
+    _ -> {
+      let peer_elements =
+        list.index_map(peers, fn(p, idx) {
+          let angle =
+            6.283185307179586
+            *. int.to_float(idx)
+            /. int.to_float(total_peers)
+            -. 1.5707963267948966
+          let px = cx +. r_orbit *. ffi_cos(angle)
+          let py = cy +. r_orbit *. ffi_sin(angle)
+          let px_str = int.to_string(float.round(px))
+          let py_str = int.to_string(float.round(py))
+          let color = case p.state {
+            StateEstablished -> "#3fb950"
+            StateOpenConfirm | StateOpenSent -> "#d29922"
+            _ -> "#f85149"
+          }
+          let stroke_dash = case p.drained {
+            True -> "stroke-dasharray='6,4'"
+            False -> ""
+          }
+          let link =
+            "<line x1='440' y1='210' x2='"
+            <> px_str
+            <> "' y2='"
+            <> py_str
+            <> "' stroke='"
+            <> color
+            <> "' stroke-width='2.5' "
+            <> stroke_dash
+            <> " opacity='0.8' />"
+
+          let node =
+            "<g class='peer-node'>"
+            <> "<circle cx='"
+            <> px_str
+            <> "' cy='"
+            <> py_str
+            <> "' r='30' fill='#161b22' stroke='"
+            <> color
+            <> "' stroke-width='2' />"
+            <> "<text x='"
+            <> px_str
+            <> "' y='"
+            <> int.to_string(float.round(py) - 3)
+            <> "' fill='#f0f6fc' font-weight='bold' font-size='8.5' text-anchor='middle'>AS"
+            <> int.to_string(p.remote_as)
+            <> "</text>"
+            <> "<text x='"
+            <> px_str
+            <> "' y='"
+            <> int.to_string(float.round(py) + 9)
+            <> "' fill='"
+            <> color
+            <> "' font-size='7.5' text-anchor='middle'>"
+            <> fsm_state_to_string(p.state)
+            <> "</text>"
+            <> "<text x='"
+            <> px_str
+            <> "' y='"
+            <> int.to_string(float.round(py) + 42)
+            <> "' fill='#8b949e' font-size='9.5' font-weight='bold' text-anchor='middle'>"
+            <> p.id
+            <> "</text>"
+            <> "</g>"
+
+          #(link, node)
+        })
+
+      let links = list.map(peer_elements, fn(t) { t.0 }) |> string.join("\n")
+      let nodes = list.map(peer_elements, fn(t) { t.1 }) |> string.join("\n")
+      #(links, nodes)
+    }
+  }
+
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 880 420' width='100%' height='420' style='background:#0d1117;border:1px solid #30363d;border-radius:6px;'>"
+  <> "<defs>"
+  <> "<radialGradient id='hub-grad' cx='50%' cy='50%' r='50%'>"
+  <> "<stop offset='0%' stop-color='#388bfd' stop-opacity='0.9' />"
+  <> "<stop offset='100%' stop-color='#1f6feb' stop-opacity='0.6' />"
+  <> "</radialGradient>"
+  <> "<filter id='glow' x='-20%' y='-20%' width='140%' height='140%'>"
+  <> "<feGaussianBlur stdDeviation='3' result='blur' />"
+  <> "<feComposite in='SourceGraphic' in2='blur' operator='over' />"
+  <> "</filter>"
+  <> "</defs>"
+  <> "<!-- Radar circles -->"
+  <> "<circle cx='440' cy='210' r='75' fill='none' stroke='#21262d' stroke-dasharray='4,4' />"
+  <> "<circle cx='440' cy='210' r='145' fill='none' stroke='#21262d' stroke-dasharray='4,4' />"
+  <> "<!-- Peering Links -->"
+  <> links_svg
+  <> "<!-- Central Router Hub -->"
+  <> "<g>"
+  <> "<circle cx='440' cy='210' r='36' fill='url(#hub-grad)' stroke='#58a6ff' stroke-width='3' filter='url(#glow)' />"
+  <> "<text x='440' y='206' fill='#ffffff' font-weight='bold' font-size='12' text-anchor='middle'>AS"
+  <> int.to_string(asn)
+  <> "</text>"
+  <> "<text x='440' y='220' fill='#bc8cff' font-weight='bold' font-size='9' text-anchor='middle'>LOCAL HUB</text>"
+  <> "<text x='440' y='232' fill='#8b949e' font-size='8' text-anchor='middle'>"
+  <> router_id
+  <> "</text>"
+  <> "</g>"
+  <> "<!-- Peer Nodes -->"
+  <> nodes_svg
+  <> "<!-- Legend -->"
+  <> "<g transform='translate(20, 20)'>"
+  <> "<rect width='160' height='90' fill='#161b22' rx='4' stroke='#30363d' opacity='0.9' />"
+  <> "<circle cx='14' cy='18' r='5' fill='#3fb950' />"
+  <> "<text x='26' y='22' fill='#c9d1d9' font-size='10'>Established</text>"
+  <> "<circle cx='14' cy='38' r='5' fill='#d29922' />"
+  <> "<text x='26' y='42' fill='#c9d1d9' font-size='10'>Syncing / Drained</text>"
+  <> "<circle cx='14' cy='58' r='5' fill='#f85149' />"
+  <> "<text x='26' y='62' fill='#c9d1d9' font-size='10'>Connect / Idle</text>"
+  <> "<circle cx='14' cy='78' r='5' fill='#58a6ff' />"
+  <> "<text x='26' y='82' fill='#c9d1d9' font-size='10'>AS"
+  <> int.to_string(asn)
+  <> " (Local)</text>"
+  <> "</g>"
+  <> "</svg>"
+}
+
+pub fn render_json_topology(
+  asn: Int,
+  router_id: String,
+  peers: List(PeerStats),
+  routes: List(Route),
+) -> String {
+  let local_node =
+    json.object([
+      #("id", json.string("local")),
+      #("label", json.string("AS" <> int.to_string(asn))),
+      #("type", json.string("hub")),
+      #("router_id", json.string(router_id)),
+      #("status", json.string("active")),
+    ])
+
+  let peer_nodes =
+    list.map(peers, fn(p) {
+      json.object([
+        #("id", json.string(p.id)),
+        #("label", json.string("AS" <> int.to_string(p.remote_as))),
+        #("type", json.string("peer")),
+        #("status", json.string(fsm_state_to_string(p.state))),
+        #("prefixes_received", json.int(p.prefixes_received)),
+        #("drained", json.bool(p.drained)),
+      ])
+    })
+
+  let all_nodes = [local_node, ..peer_nodes]
+
+  let links =
+    list.map(peers, fn(p) {
+      json.object([
+        #("source", json.string("local")),
+        #("target", json.string(p.id)),
+        #("state", json.string(fsm_state_to_string(p.state))),
+        #("prefixes_received", json.int(p.prefixes_received)),
+        #("prefixes_advertised", json.int(p.prefixes_advertised)),
+      ])
+    })
+
+  json.object([
+    #("local_as", json.int(asn)),
+    #("router_id", json.string(router_id)),
+    #("total_nodes", json.int(list.length(all_nodes))),
+    #("total_links", json.int(list.length(links))),
+    #("total_routes", json.int(list.length(routes))),
+    #("nodes", json.preprocessed_array(all_nodes)),
+    #("links", json.preprocessed_array(links)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_routereflector(
+  cluster_id: Option(IpAddress),
+  peers: List(PeerConfig),
+) -> String {
+  let clients =
+    list.filter(peers, fn(p) { p.route_reflector_client })
+    |> list.map(fn(p) {
+      json.object([
+        #("id", json.string(p.id)),
+        #("remote_as", json.int(p.remote_as)),
+        #("remote_ip", json.string(ip_to_string(p.remote_ip))),
+        #("role", json.string("client")),
+      ])
+    })
+
+  let non_clients =
+    list.filter(peers, fn(p) { !p.route_reflector_client })
+    |> list.map(fn(p) {
+      json.object([
+        #("id", json.string(p.id)),
+        #("remote_as", json.int(p.remote_as)),
+        #("role", json.string("non-client")),
+      ])
+    })
+
+  json.object([
+    #("rfc", json.string("RFC 4456")),
+    #("description", json.string("BGP Route Reflection")),
+    #("cluster_id", case cluster_id {
+      Some(cid) -> json.string(ip_to_string(cid))
+      None -> json.null()
+    }),
+    #("clients_count", json.int(list.length(clients))),
+    #("clients", json.preprocessed_array(clients)),
+    #("non_clients", json.preprocessed_array(non_clients)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_confederation(
+  confed_id: Option(Int),
+  peers: List(PeerConfig),
+) -> String {
+  let confed_members =
+    list.filter(peers, fn(p) { p.confederation_member })
+    |> list.map(fn(p) {
+      json.object([
+        #("id", json.string(p.id)),
+        #("member_as", json.int(p.remote_as)),
+        #("remote_ip", json.string(ip_to_string(p.remote_ip))),
+        #("role", json.string("confederation_member")),
+      ])
+    })
+
+  json.object([
+    #("rfc", json.string("RFC 5065")),
+    #("description", json.string("Autonomous System Confederations for BGP")),
+    #("confederation_id", case confed_id {
+      Some(cid) -> json.int(cid)
+      None -> json.null()
+    }),
+    #("member_peers_count", json.int(list.length(confed_members))),
+    #("member_peers", json.preprocessed_array(confed_members)),
   ])
   |> json.to_string
 }
@@ -505,6 +767,11 @@ pub fn render_dashboard_html(
   </div>
 
   <div class=\"card\">
+    <h2>Interactive BGP Network Topology</h2>
+    " <> render_topology_svg(asn, router_id, peers) <> "
+  </div>
+
+  <div class=\"card\">
     <h2>BGP Peers</h2>
     <table>
       <thead>
@@ -582,7 +849,7 @@ pub fn render_dashboard_html(
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a>
   </footer>
 </body>
 </html>"
@@ -602,6 +869,20 @@ fn format_as_path(segs: List(types.AsPathSegment)) -> String {
             |> string.join(" ")
           }
           <> "}"
+        AsConfedSequence(asns) ->
+          "("
+          <> {
+            list.map(asns, fn(asn) { int.to_string(asn) })
+            |> string.join(" ")
+          }
+          <> ")"
+        AsConfedSet(asns) ->
+          "[("
+          <> {
+            list.map(asns, fn(asn) { int.to_string(asn) })
+            |> string.join(" ")
+          }
+          <> ")]"
       }
     })
   string.join(seg_strs, " ")

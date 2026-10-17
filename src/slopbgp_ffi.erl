@@ -12,7 +12,9 @@
     parse_ip_tuple/1,
     get_args/0,
     math_pow/2,
-    math_log/1
+    math_log/1,
+    math_cos/1,
+    math_sin/1
 ]).
 
 get_args() ->
@@ -127,3 +129,14 @@ math_log(Val) when is_integer(Val) ->
     math:log(float(Val));
 math_log(Val) ->
     math:log(Val).
+
+math_cos(Val) when is_integer(Val) ->
+    math:cos(float(Val));
+math_cos(Val) ->
+    math:cos(Val).
+
+math_sin(Val) when is_integer(Val) ->
+    math:sin(float(Val));
+math_sin(Val) ->
+    math:sin(Val).
+

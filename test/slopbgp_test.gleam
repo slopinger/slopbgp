@@ -6,6 +6,7 @@ import gleeunit/should
 import slopbgp/api/http
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
 import slopbgp/bgp/capabilities.{decode_capabilities, encode_capability}
+import slopbgp/bgp/confederation
 import slopbgp/bgp/damping.{default_damping_config, evaluate_flap, record_flap}
 import slopbgp/bgp/flowspec.{
   decode_action_community, decode_flowspec_nlri, encode_action_community,
@@ -20,6 +21,8 @@ import slopbgp/bgp/graceful_shutdown.{
   graceful_shutdown_community, has_graceful_shutdown,
 }
 import slopbgp/bgp/message.{decode_message, encode_message}
+import slopbgp/bgp/rfc8212
+import slopbgp/bgp/routereflector
 import slopbgp/bgp/shutdown_communication.{
   decode_shutdown_communication, encode_shutdown_communication,
   format_cease_subcode, make_shutdown_notification,
@@ -40,18 +43,18 @@ import slopbgp/server
 import slopbgp/simulator.{run_simulation}
 import slopbgp/types.{
   type Route, ActionAccept, ActionPrependAs, ActionSetLocalPref, AfiIpv4,
-  AfiIpv6, AsSequence, AttrAsPath, AttrCommunities, AttrLargeCommunities,
-  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop, AttrOrigin,
-  BmpMsgInitiation, BmpMsgPeerDown, BmpMsgRouteMonitoring, BmpMsgStatsReport,
-  BmpMsgTermination, BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole,
-  CapEnhancedRouteRefresh, CapExtendedMessage, CapExtendedNextHop,
-  CapFourOctetAsn, CapMultiProtocol, CapRouteRefresh, Community, FlowActionDrop,
-  FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowLabel, FlowNextHeader,
-  FlowSrcPrefix, FlowspecRule, Ipv4, Ipv6, LargeCommunity, MatchAsPathContains,
-  MsgKeepalive, MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig,
-  PolicyChain, PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer,
-  Route, SafiUnicast, StateConnect, StateEstablished, StateOpenConfirm,
-  StateOpenSent,
+  AfiIpv6, AsConfedSequence, AsConfedSet, AsSequence, AttrAsPath,
+  AttrClusterList, AttrCommunities, AttrLargeCommunities, AttrLocalPref, AttrMed,
+  AttrMpReachNlri, AttrNextHop, AttrOrigin, AttrOriginatorId, BmpMsgInitiation,
+  BmpMsgPeerDown, BmpMsgRouteMonitoring, BmpMsgStatsReport, BmpMsgTermination,
+  BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
+  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapMultiProtocol,
+  CapRouteRefresh, Community, FlowActionDrop, FlowDstPort, FlowDstPrefix,
+  FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix, FlowspecRule, Ipv4,
+  Ipv6, LargeCommunity, MatchAsPathContains, MsgKeepalive, MsgNotification,
+  MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain, PolicyRule,
+  RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, Route, SafiUnicast,
+  StateConnect, StateEstablished, StateOpenConfirm, StateOpenSent,
 }
 
 pub fn main() {
@@ -277,6 +280,8 @@ pub fn rib_decision_process_test() {
       peer_id: "peer1",
       timestamp: 100,
       path_id: None,
+      originator_id: None,
+      cluster_list: [],
     )
 
   // r2 has higher local_pref
@@ -323,6 +328,8 @@ pub fn graceful_shutdown_test() {
       peer_id: "peer_de",
       timestamp: 1000,
       path_id: None,
+      originator_id: None,
+      cluster_list: [],
     )
 
   has_graceful_shutdown(clean_route) |> should.equal(False)
@@ -427,6 +434,8 @@ pub fn routing_policy_test() {
       peer_id: "peer_baragoon",
       timestamp: 1000,
       path_id: None,
+      originator_id: None,
+      cluster_list: [],
     )
 
   let custom_policy =
@@ -483,6 +492,8 @@ pub fn prometheus_metrics_test() {
       peer_id: "peer1",
       timestamp: 1000,
       path_id: None,
+      originator_id: None,
+      cluster_list: [],
     )
 
   let data =
@@ -710,6 +721,8 @@ pub fn route_server_operations_test() {
       peer_id: "client_a",
       timestamp: 1000,
       path_id: None,
+      originator_id: None,
+      cluster_list: [],
     )
 
   // 1. Transparent AS_PATH forwarding & NEXT_HOP preservation
@@ -826,6 +839,8 @@ pub fn routeserver_api_and_dynamic_reload_test() {
       import_filters: [],
       export_filters: [],
       route_server_client: True,
+      route_reflector_client: False,
+      confederation_member: False,
     )
 
   // 1. Test render_json_routeserver
@@ -854,4 +869,341 @@ pub fn routeserver_api_and_dynamic_reload_test() {
   server.get_peer_stats_list(srv_cleared)
   |> list.any(fn(p) { p.id == "rs_peer_1" })
   |> should.equal(False)
+}
+
+// 21. RFC 4456 BGP Route Reflection Tests
+pub fn route_reflection_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let my_router_id = Ipv4(172, 20, 10, 1)
+  let my_cluster_id = Ipv4(172, 20, 10, 1)
+  let sender_router_id = Ipv4(172, 20, 10, 2)
+  let other_router_id = Ipv4(172, 20, 10, 3)
+
+  let base_route =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_rr_client",
+      timestamp: 1000,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  // 1. Loop detection
+  let route_with_orig_loop =
+    Route(..base_route, originator_id: Some(my_router_id))
+  routereflector.is_originator_loop(route_with_orig_loop, my_router_id)
+  |> should.equal(True)
+  routereflector.is_originator_loop(base_route, my_router_id)
+  |> should.equal(False)
+
+  let route_with_cluster_loop =
+    Route(..base_route, cluster_list: [my_cluster_id, other_router_id])
+  routereflector.is_cluster_loop(route_with_cluster_loop, my_cluster_id)
+  |> should.equal(True)
+  routereflector.is_cluster_loop(base_route, my_cluster_id)
+  |> should.equal(False)
+
+  // 2. Reflection propagation rules per RFC 4456 Section 8
+  // Non-client to non-client: NEVER reflect
+  routereflector.should_reflect_to_peer(False, False, False)
+  |> should.equal(False)
+
+  // Non-client to client: MUST reflect
+  routereflector.should_reflect_to_peer(False, True, False)
+  |> should.equal(True)
+
+  // Client to non-client: MUST reflect
+  routereflector.should_reflect_to_peer(True, False, False)
+  |> should.equal(True)
+
+  // Client to client: MUST reflect
+  routereflector.should_reflect_to_peer(True, True, False)
+  |> should.equal(True)
+
+  // eBGP to any: MUST propagate
+  routereflector.should_reflect_to_peer(False, False, True)
+  |> should.equal(True)
+
+  // 3. Route reflection modification
+  let reflected =
+    routereflector.reflect_route(base_route, my_cluster_id, sender_router_id)
+  reflected.originator_id |> should.equal(Some(sender_router_id))
+  reflected.cluster_list |> should.equal([my_cluster_id])
+
+  // If originator_id was already present, it is preserved
+  let pre_existing_orig = Ipv4(172, 20, 10, 99)
+  let route_with_orig =
+    Route(..base_route, originator_id: Some(pre_existing_orig))
+  let reflected2 =
+    routereflector.reflect_route(
+      route_with_orig,
+      my_cluster_id,
+      sender_router_id,
+    )
+  reflected2.originator_id |> should.equal(Some(pre_existing_orig))
+  reflected2.cluster_list |> should.equal([my_cluster_id])
+
+  // 4. Decision process tie breakers (RFC 4456)
+  // Shorter cluster_list wins
+  let r_short_clusters = Route(..base_route, cluster_list: [Ipv4(1, 1, 1, 1)])
+  let r_long_clusters =
+    Route(..base_route, cluster_list: [Ipv4(1, 1, 1, 1), Ipv4(2, 2, 2, 2)])
+  compare_routes(r_short_clusters, r_long_clusters) |> should.equal(True)
+  compare_routes(r_long_clusters, r_short_clusters) |> should.equal(False)
+
+  // Smaller originator_id wins
+  let r_low_orig = Route(..base_route, originator_id: Some(Ipv4(10, 0, 0, 1)))
+  let r_high_orig = Route(..base_route, originator_id: Some(Ipv4(10, 0, 0, 2)))
+  compare_routes(r_low_orig, r_high_orig) |> should.equal(True)
+  compare_routes(r_high_orig, r_low_orig) |> should.equal(False)
+
+  // 5. Wire encoding and decoding of ORIGINATOR_ID and CLUSTER_LIST
+  let attrs = [
+    AttrOriginatorId(my_router_id),
+    AttrClusterList([my_cluster_id, other_router_id]),
+  ]
+  let enc = encode_attributes(attrs)
+  let assert Ok(dec_attrs) = decode_attributes(enc, False)
+  dec_attrs |> should.equal(attrs)
+}
+
+// 22. RFC 5065 BGP Confederations Tests
+pub fn confederation_test() {
+  let member_as1 = 4_242_421_111
+  let member_as2 = 4_242_422_222
+  let confed_id = 4_242_420_000
+  let local_ip = Ipv4(172, 20, 10, 1)
+
+  // 1. Confederation loop detection
+  let path_with_confed_loop = [
+    AsConfedSequence([member_as1, member_as2]),
+    AsSequence([4_242_420_125]),
+  ]
+  confederation.has_confed_loop(path_with_confed_loop, member_as1)
+  |> should.equal(True)
+  confederation.has_confed_loop(path_with_confed_loop, member_as2)
+  |> should.equal(True)
+  confederation.has_confed_loop(path_with_confed_loop, 4_242_429_999)
+  |> should.equal(False)
+
+  let path_with_confed_set = [AsConfedSet([member_as1])]
+  confederation.has_confed_loop(path_with_confed_set, member_as1)
+  |> should.equal(True)
+
+  // 2. Effective AS_PATH length (confed segments excluded per RFC 5065 Section 5.3)
+  let path_with_confed = [
+    AsConfedSequence([member_as1, member_as2]),
+    AsConfedSet([member_as1]),
+    AsSequence([4_242_420_125, 4_242_421_732]),
+  ]
+  confederation.effective_as_path_length(path_with_confed)
+  |> should.equal(2)
+
+  // 3. Intra-confederation route preparation
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let base_route =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_confed_1",
+      timestamp: 1000,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let intra_route =
+    confederation.prepare_confed_outbound_route(
+      base_route,
+      True,
+      member_as1,
+      confed_id,
+      local_ip,
+    )
+  // Local member AS prepended into AS_CONFED_SEQUENCE
+  intra_route.as_path
+  |> should.equal([
+    AsConfedSequence([member_as1]),
+    AsSequence([4_242_421_732]),
+  ])
+  // Next-hop and MED are preserved
+  intra_route.next_hop |> should.equal(Ipv4(172, 22, 64, 1))
+  intra_route.med |> should.equal(10)
+
+  // 4. External boundary route preparation (to eBGP outside confederation)
+  let external_route =
+    confederation.prepare_confed_outbound_route(
+      intra_route,
+      False,
+      member_as1,
+      confed_id,
+      local_ip,
+    )
+  // Confed segments stripped, public Confederation Identifier prepended
+  external_route.as_path
+  |> should.equal([AsSequence([confed_id, 4_242_421_732])])
+  // Next-hop updated to local IP
+  external_route.next_hop |> should.equal(local_ip)
+
+  // 5. Wire encoding and decoding of Confederation segments (Types 3 and 4)
+  let confed_attrs = [
+    AttrAsPath([
+      AsConfedSequence([member_as1, member_as2]),
+      AsConfedSet([member_as1]),
+      AsSequence([4_242_420_125]),
+    ]),
+  ]
+  let enc = encode_attributes(confed_attrs)
+  let assert Ok(dec_attrs) = decode_attributes(enc, False)
+  dec_attrs |> should.equal(confed_attrs)
+}
+
+// 23. RFC 8212 Default External BGP Route Propagation Behavior Tests
+pub fn rfc8212_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let r =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "ebgp_peer",
+      timestamp: 1000,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  rfc8212.is_ebgp(4_242_420_125, 4_242_421_732) |> should.equal(True)
+  rfc8212.is_ebgp(4_242_420_125, 4_242_420_125) |> should.equal(False)
+
+  // Inbound eBGP route without explicit policy rejected when enforce is True
+  case rfc8212.evaluate_rfc8212_inbound(r, True, False, True) {
+    Error(_) -> True
+    Ok(_) -> False
+  }
+  |> should.equal(True)
+
+  // Inbound eBGP route with explicit policy accepted
+  case rfc8212.evaluate_rfc8212_inbound(r, True, True, True) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  |> should.equal(True)
+
+  // Inbound iBGP route without policy accepted (RFC 8212 applies to eBGP)
+  case rfc8212.evaluate_rfc8212_inbound(r, False, False, True) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+  |> should.equal(True)
+
+  // Outbound eBGP route without export policy denied
+  rfc8212.evaluate_rfc8212_outbound(r, True, False, True)
+  |> should.equal(False)
+
+  // Outbound eBGP route with export policy permitted
+  rfc8212.evaluate_rfc8212_outbound(r, True, True, True)
+  |> should.equal(True)
+}
+
+// 24. Interactive SVG Network Topology Map and REST Endpoints Tests
+pub fn topology_and_rest_endpoints_test() {
+  let base_cfg = config.default_config()
+  let srv = server.new_server(base_cfg)
+  let peers = server.get_peer_stats_list(srv)
+  let routes = server.get_all_active_routes(srv)
+
+  // 1. Test render_topology_svg
+  let svg = http.render_topology_svg(base_cfg.asn, "172.20.10.1", peers)
+  string.contains(svg, "<svg") |> should.equal(True)
+  string.contains(svg, "AS4242420125") |> should.equal(True)
+  string.contains(svg, "LOCAL HUB") |> should.equal(True)
+  string.contains(svg, "radar") |> should.equal(False)
+  string.contains(svg, "</svg>") |> should.equal(True)
+
+  // 2. Test render_json_topology
+  let topo_json =
+    http.render_json_topology(base_cfg.asn, "172.20.10.1", peers, routes)
+  string.contains(topo_json, "\"local_as\":4242420125") |> should.equal(True)
+  string.contains(topo_json, "\"nodes\":") |> should.equal(True)
+  string.contains(topo_json, "\"links\":") |> should.equal(True)
+
+  // 3. Test render_json_routereflector
+  let rr_peer =
+    PeerConfig(
+      id: "peer_rr1",
+      name: "RR Client 1",
+      remote_as: 4_242_420_125,
+      remote_ip: Ipv4(172, 20, 10, 2),
+      local_as: base_cfg.asn,
+      local_ip: base_cfg.router_id,
+      port: 179,
+      hold_time: 90,
+      keepalive_time: 30,
+      passive: False,
+      enable_ipv4: True,
+      enable_ipv6: True,
+      extended_next_hop: True,
+      add_path_rx: True,
+      add_path_tx: False,
+      dn42_latency: None,
+      dn42_bandwidth: None,
+      dn42_crypto: None,
+      dn42_region: None,
+      import_filters: [],
+      export_filters: [],
+      route_server_client: False,
+      route_reflector_client: True,
+      confederation_member: False,
+    )
+  let rr_json =
+    http.render_json_routereflector(Some(Ipv4(172, 20, 10, 1)), [rr_peer])
+  string.contains(rr_json, "RFC 4456") |> should.equal(True)
+  string.contains(rr_json, "172.20.10.1") |> should.equal(True)
+  string.contains(rr_json, "\"clients_count\":1") |> should.equal(True)
+
+  // 4. Test render_json_confederation
+  let confed_peer =
+    PeerConfig(
+      ..rr_peer,
+      route_reflector_client: False,
+      confederation_member: True,
+    )
+  let confed_json =
+    http.render_json_confederation(Some(4_242_420_000), [confed_peer])
+  string.contains(confed_json, "RFC 5065") |> should.equal(True)
+  string.contains(confed_json, "4242420000") |> should.equal(True)
+  string.contains(confed_json, "\"member_peers_count\":1")
+  |> should.equal(True)
 }

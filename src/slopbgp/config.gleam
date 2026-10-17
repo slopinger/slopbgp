@@ -1,7 +1,7 @@
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import simplifile
 import slopbgp/ip.{parse_ip}
@@ -46,6 +46,9 @@ pub type DaemonConfig {
     roa_v6_path: String,
     fib_table: Int,
     peers: List(PeerConfig),
+    cluster_id: Option(IpAddress),
+    confederation_id: Option(Int),
+    confederation_peers: List(Int),
   )
 }
 
@@ -61,6 +64,9 @@ pub fn default_config() -> DaemonConfig {
     roa_v6_path: "/etc/bird/roa_dn42_v6.conf",
     fib_table: 42,
     peers: [],
+    cluster_id: Some(Ipv4(172, 22, 64, 129)),
+    confederation_id: None,
+    confederation_peers: [],
   )
 }
 
@@ -162,24 +168,31 @@ pub fn parse_config_json(json_str: String) -> Result(DaemonConfig, String) {
               import_filters: [],
               export_filters: [],
               route_server_client: False,
+              route_reflector_client: False,
+              confederation_member: False,
             ))
           }),
         )
 
       use peers <- result.try(peers_res)
 
-      Ok(DaemonConfig(
-        asn: raw.asn,
-        router_id: r_id,
-        local_ipv4: v4,
-        local_ipv6: v6,
-        bgp_port: raw.bgp_port,
-        api_port: raw.api_port,
-        roa_v4_path: "/etc/bird/roa_dn42.conf",
-        roa_v6_path: "/etc/bird/roa_dn42_v6.conf",
-        fib_table: raw.fib_table,
-        peers: peers,
-      ))
+      Ok(
+        DaemonConfig(
+          asn: raw.asn,
+          router_id: r_id,
+          local_ipv4: v4,
+          local_ipv6: v6,
+          bgp_port: raw.bgp_port,
+          api_port: raw.api_port,
+          roa_v4_path: "/etc/bird/roa_dn42.conf",
+          roa_v6_path: "/etc/bird/roa_dn42_v6.conf",
+          fib_table: raw.fib_table,
+          peers: peers,
+          cluster_id: Some(r_id),
+          confederation_id: None,
+          confederation_peers: [],
+        ),
+      )
     }
     Error(_) -> Error("JSON parse or validation error in config")
   }
