@@ -1,10 +1,10 @@
 import gleam/list
 import slopbgp/types.{
   type Afi, type BgpCapability, type BgpRole, type Safi, AfiIpv4, AfiIpv6,
-  AfiUnknown, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
+  AfiL2Vpn, AfiUnknown, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
   CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapGracefulRestart,
   CapMultiProtocol, CapRouteRefresh, CapUnknown, RoleCustomer, RolePeer,
-  RoleProvider, RoleRouteServer, RoleRouteServerClient, RoleUnknown,
+  RoleProvider, RoleRouteServer, RoleRouteServerClient, RoleUnknown, SafiEvpn,
   SafiFlowspec, SafiMplsVpn, SafiMulticast, SafiUnicast, SafiUnknown,
 }
 
@@ -12,6 +12,7 @@ pub fn afi_to_int(afi: Afi) -> Int {
   case afi {
     AfiIpv4 -> 1
     AfiIpv6 -> 2
+    AfiL2Vpn -> 25
     AfiUnknown(code) -> code
   }
 }
@@ -20,6 +21,7 @@ pub fn int_to_afi(code: Int) -> Afi {
   case code {
     1 -> AfiIpv4
     2 -> AfiIpv6
+    25 -> AfiL2Vpn
     _ -> AfiUnknown(code)
   }
 }
@@ -28,6 +30,7 @@ pub fn safi_to_int(safi: Safi) -> Int {
   case safi {
     SafiUnicast -> 1
     SafiMulticast -> 2
+    SafiEvpn -> 70
     SafiMplsVpn -> 128
     SafiFlowspec -> 133
     SafiUnknown(code) -> code
@@ -38,6 +41,7 @@ pub fn int_to_safi(code: Int) -> Safi {
   case code {
     1 -> SafiUnicast
     2 -> SafiMulticast
+    70 -> SafiEvpn
     128 -> SafiMplsVpn
     133 -> SafiFlowspec
     _ -> SafiUnknown(code)

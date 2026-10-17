@@ -290,6 +290,14 @@ pub fn is_prefix_contained(child: IpPrefix, parent: IpPrefix) -> Bool {
   }
 }
 
+pub fn is_ip_in_prefix(ip: IpAddress, prefix: IpPrefix) -> Bool {
+  let host_len = case ip {
+    Ipv4(..) -> 32
+    Ipv6(..) -> 128
+  }
+  is_prefix_contained(IpPrefix(address: ip, length: host_len), prefix)
+}
+
 pub fn ip_to_bytes(ip: IpAddress) -> BitArray {
   case ip {
     Ipv4(a, b, c, d) -> <<a:8, b:8, c:8, d:8>>

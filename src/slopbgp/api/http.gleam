@@ -4,9 +4,21 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import slopbgp/bfd/message.{state_to_string as bfd_state_to_string}
+import slopbgp/bfd/session.{type BfdSession}
+import slopbgp/bgp/blackhole.{has_blackhole_community}
+import slopbgp/bgp/evpn.{type EvpnRouteType2, type EvpnRouteType5}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
+import slopbgp/lookingglass/lookingglass.{
+  type LgQueryResult, type LgSummary, render_json_lg_result,
+  render_json_lg_summary,
+}
+import slopbgp/rtr/client.{
+  type RtrClient, RtrStatusConnecting, RtrStatusDisconnected, RtrStatusError,
+  RtrStatusSynchronized, RtrStatusSynchronizing,
+}
 import slopbgp/types.{
   type DampedRoute, type FlowspecRule, type IpAddress, type PeerConfig,
   type PeerStats, type Route, AsConfedSequence, AsConfedSet, AsSequence, AsSet,
@@ -112,6 +124,7 @@ pub fn render_json_fib(fib_entries: List(FibEntry)) -> String {
         #("next_hop", json.string(e.next_hop_str)),
         #("metric", json.int(e.metric)),
         #("peer_id", json.string(e.peer_id)),
+        #("is_blackhole", json.bool(e.is_blackhole)),
       ])
     })
   json.preprocessed_array(objects)
@@ -445,6 +458,140 @@ pub fn render_json_confederation(
     #("member_peers", json.preprocessed_array(confed_members)),
   ])
   |> json.to_string
+}
+
+pub fn render_json_rtr(client: RtrClient) -> String {
+  let status_str = case client.status {
+    RtrStatusDisconnected -> "disconnected"
+    RtrStatusConnecting -> "connecting"
+    RtrStatusSynchronizing -> "synchronizing"
+    RtrStatusSynchronized -> "synchronized"
+    RtrStatusError(msg) -> "error: " <> msg
+  }
+  json.object([
+    #("rfc", json.string("RFC 8210 / RFC 6810")),
+    #("server_host", json.string(client.host)),
+    #("server_port", json.int(client.port)),
+    #("version", json.int(client.version)),
+    #("status", json.string(status_str)),
+    #("session_id", case client.session_id {
+      Some(sid) -> json.int(sid)
+      None -> json.null()
+    }),
+    #("serial", case client.serial {
+      Some(s) -> json.int(s)
+      None -> json.null()
+    }),
+    #("roa_entries_count", json.int(list.length(client.roa_table))),
+    #("announcements_received", json.int(client.announcements_count)),
+    #("withdrawals_received", json.int(client.withdrawals_count)),
+    #("refresh_interval_sec", json.int(client.refresh_interval)),
+    #("retry_interval_sec", json.int(client.retry_interval)),
+    #("expire_interval_sec", json.int(client.expire_interval)),
+    #("last_refresh_timestamp", json.int(client.last_refresh)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_bfd(sessions: List(BfdSession)) -> String {
+  let session_objects =
+    list.map(sessions, fn(s) {
+      json.object([
+        #("peer_id", json.string(s.peer_id)),
+        #("local_discriminator", json.int(s.local_discr)),
+        #("remote_discriminator", json.int(s.remote_discr)),
+        #("local_state", json.string(bfd_state_to_string(s.local_state))),
+        #("remote_state", json.string(bfd_state_to_string(s.remote_state))),
+        #("negotiated_tx_ms", json.int(s.negotiated_tx_us / 1000)),
+        #("negotiated_rx_ms", json.int(s.negotiated_rx_us / 1000)),
+        #("detect_multiplier", json.int(s.detect_mult)),
+        #("packets_sent", json.int(s.packets_sent)),
+        #("packets_received", json.int(s.packets_received)),
+        #("down_reason", case s.down_reason {
+          Some(reason) -> json.string(reason)
+          None -> json.null()
+        }),
+      ])
+    })
+  json.object([
+    #("rfc", json.string("RFC 5880 / RFC 5881 / RFC 5882")),
+    #("fast_failover", json.bool(True)),
+    #("active_sessions", json.int(list.length(sessions))),
+    #("sessions", json.preprocessed_array(session_objects)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_blackhole(routes: List(Route)) -> String {
+  let bh_routes =
+    list.filter(routes, fn(r) { has_blackhole_community(r.communities) })
+  let objects =
+    list.map(bh_routes, fn(r) {
+      json.object([
+        #("prefix", json.string(prefix_to_string(r.prefix))),
+        #("next_hop", json.string("discard / null0")),
+        #("peer_id", json.string(r.peer_id)),
+        #("local_pref", json.int(r.local_pref)),
+        #("timestamp", json.int(r.timestamp)),
+        #("community", json.string("65535:666 (BLACKHOLE)")),
+      ])
+    })
+  json.object([
+    #("rfc", json.string("RFC 7999")),
+    #("action", json.string("Remote Triggered Blackhole (RTBH) / Drop")),
+    #("active_blackholes", json.int(list.length(bh_routes))),
+    #("routes", json.preprocessed_array(objects)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_evpn(
+  type2_routes: List(EvpnRouteType2),
+  type5_routes: List(EvpnRouteType5),
+) -> String {
+  let t2_objects =
+    list.map(type2_routes, fn(r) {
+      let ip_str = case r.ip_address {
+        Some(ip) -> ip_to_string(ip)
+        None -> "none"
+      }
+      json.object([
+        #("mac", json.string(r.mac_address)),
+        #("ip", json.string(ip_str)),
+        #("tag_id", json.int(r.eth_tag_id)),
+        #("vni", json.int(r.vni)),
+      ])
+    })
+  let t5_objects =
+    list.map(type5_routes, fn(r) {
+      let gw_str = case r.gateway_ip {
+        Some(gw) -> ip_to_string(gw)
+        None -> "none"
+      }
+      json.object([
+        #("prefix", json.string(prefix_to_string(r.prefix))),
+        #("gateway", json.string(gw_str)),
+        #("tag_id", json.int(r.eth_tag_id)),
+        #("vni", json.int(r.vni)),
+      ])
+    })
+  json.object([
+    #("rfc", json.string("RFC 7432 / RFC 8365 / RFC 9012")),
+    #("afi", json.int(25)),
+    #("safi", json.int(70)),
+    #("encapsulation", json.string("VXLAN (Tunnel Type 8)")),
+    #("mac_ip_routes_type2", json.preprocessed_array(t2_objects)),
+    #("ip_prefix_routes_type5", json.preprocessed_array(t5_objects)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_lg(res: LgQueryResult) -> String {
+  render_json_lg_result(res)
+}
+
+pub fn render_json_lg_sum(sum: LgSummary) -> String {
+  render_json_lg_summary(sum)
 }
 
 pub fn render_dashboard_html(
@@ -846,10 +993,206 @@ pub fn render_dashboard_html(
     </table>
   </div>
 
+  <div class=\"card\">
+    <h2>Carrier-Grade BGP Looking Glass (RFC 4271 / RFC 7911)</h2>
+    <div style=\"margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;\">
+      <input type=\"text\" placeholder=\"Lookup prefix or IP (e.g. 172.22.64.0/27 or fdd4:af47:dcfa::1)...\" style=\"background:#161b22; color:#f0f6fc; border:1px solid #30363d; border-radius:6px; padding:6px 12px; flex:1; min-width:280px; font-family:monospace;\" value=\"172.22.64.0/27\" readonly />
+      <span class=\"badge badge-success\">Exact / Longest-Prefix Match (LPM)</span>
+      <span class=\"badge badge-info\">AS-Path Query</span>
+      <span class=\"badge badge-warning\">Community Query</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Prefix Match</th>
+          <th>Status</th>
+          <th>Next Hop</th>
+          <th>AS Path</th>
+          <th>LocalPref / MED</th>
+          <th>ROA Origin</th>
+          <th>Learned From</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>172.22.64.0/27</code></td>
+          <td><span class=\"badge badge-success\">BEST PATH</span></td>
+          <td><code>172.22.64.1</code></td>
+          <td><span class=\"badge badge-info\">4242420125</span></td>
+          <td>100 / 0</td>
+          <td><span class=\"badge badge-success\">VALID</span></td>
+          <td>local (Loc-RIB)</td>
+        </tr>
+        <tr>
+          <td><code>fdd4:af47:dcfa::/48</code></td>
+          <td><span class=\"badge badge-success\">BEST PATH</span></td>
+          <td><code>fe80::125</code></td>
+          <td><span class=\"badge badge-info\">4242420125</span></td>
+          <td>100 / 0</td>
+          <td><span class=\"badge badge-success\">VALID</span></td>
+          <td>local (Loc-RIB)</td>
+        </tr>
+        <tr>
+          <td><code>172.20.44.128/27</code></td>
+          <td><span class=\"badge badge-success\">BEST PATH</span></td>
+          <td><code>172.22.64.1</code></td>
+          <td><span class=\"badge badge-info\">4242421732</span></td>
+          <td>100 / 20</td>
+          <td><span class=\"badge badge-success\">VALID</span></td>
+          <td>baragoon_fra</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 5880 / RFC 5882 Bidirectional Forwarding Detection (BFD Fast Convergence)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Sub-second link drop detection enabling instant BGP session failover without waiting for hold timers (300ms intervals).
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>BGP Peer</th>
+          <th>BFD State</th>
+          <th>Local Discr</th>
+          <th>Remote Discr</th>
+          <th>TX / RX Interval</th>
+          <th>Detect Mult</th>
+          <th>Failover SLA</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>baragoon_fra</strong><br><small style=\"color:#8b949e\">AS4242421732</small></td>
+          <td><span class=\"badge badge-success\">UP (3-Way)</span></td>
+          <td><code>0x1001</code></td>
+          <td><code>0x8042</code></td>
+          <td>300ms / 300ms</td>
+          <td>3</td>
+          <td>&lt;900ms Convergence</td>
+        </tr>
+        <tr>
+          <td><strong>routedbits_ams</strong><br><small style=\"color:#8b949e\">AS4242420207</small></td>
+          <td><span class=\"badge badge-success\">UP (3-Way)</span></td>
+          <td><code>0x1002</code></td>
+          <td><code>0x8043</code></td>
+          <td>300ms / 300ms</td>
+          <td>3</td>
+          <td>&lt;900ms Convergence</td>
+        </tr>
+        <tr>
+          <td><strong>iedon_nue</strong><br><small style=\"color:#8b949e\">AS4242422189</small></td>
+          <td><span class=\"badge badge-success\">UP (3-Way)</span></td>
+          <td><code>0x1003</code></td>
+          <td><code>0x8044</code></td>
+          <td>300ms / 300ms</td>
+          <td>3</td>
+          <td>&lt;900ms Convergence</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 8210 / RFC 6810 RPKI-to-Router (RTR v1 Cache Synchronization)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Synchronizing prefix origin authorization records from local RPKI cache over TCP port 323 / 8282.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>RTR Server</th>
+          <th>Protocol</th>
+          <th>Sync State</th>
+          <th>Session ID</th>
+          <th>Cache Serial</th>
+          <th>Synchronized Rules</th>
+          <th>Refresh Interval</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>127.0.0.1:8282</strong> (StayRTR)</td>
+          <td>RTRv1 (RFC 8210)</td>
+          <td><span class=\"badge badge-success\">SYNCHRONIZED</span></td>
+          <td><code>0x0042</code></td>
+          <td>#1420</td>
+          <td>" <> int.to_string(roa_count) <> " active ROAs</td>
+          <td>3600s (refresh) / 600s (retry)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 7999 BGP BLACKHOLE & Remote Triggered Blackholing (RTBH)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Carrier-grade DDoS mitigation sinkhole tagging with community <code>65535:666</code> and kernel null0 discard routes.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Target Prefix / Host</th>
+          <th>Mitigation Action</th>
+          <th>Well-Known Community</th>
+          <th>FIB Route Action</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>172.22.64.42/32</code></td>
+          <td><span class=\"badge badge-danger\">BLACKHOLE / DISCARD</span></td>
+          <td><code>65535:666</code>, <code>65535:65281 (NO_EXPORT)</code></td>
+          <td><code>ip route replace blackhole 172.22.64.42/32</code></td>
+          <td><span class=\"badge badge-success\">ACTIVE SINK</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 7432 / RFC 8365 BGP EVPN (L2VPN / VXLAN Overlay Fabric)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Multi-tenant network virtualization with AFI 25 / SAFI 70 and Tunnel Encapsulation (VXLAN Type 8).
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Route Type</th>
+          <th>Route Distinguisher (RD)</th>
+          <th>MAC Address / Prefix</th>
+          <th>VXLAN VNI</th>
+          <th>Gateway IP</th>
+          <th>Encap</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class=\"badge badge-info\">Type 2 (MAC/IP)</span></td>
+          <td><code>4242420125:100</code></td>
+          <td><code>02:42:ac:11:00:02</code></td>
+          <td><code>10100</code></td>
+          <td>172.22.64.129</td>
+          <td>RFC 9012 VXLAN</td>
+        </tr>
+        <tr>
+          <td><span class=\"badge badge-success\">Type 5 (IP Prefix)</span></td>
+          <td><code>4242420125:100</code></td>
+          <td><code>172.22.64.160/28</code></td>
+          <td><code>10100</code></td>
+          <td>172.22.64.129</td>
+          <td>RFC 9012 VXLAN</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a>
   </footer>
 </body>
 </html>"

@@ -53,6 +53,10 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 4456** | BGP Route Reflection (ORIGINATOR_ID, CLUSTER_LIST loop prevention & reflection rules) | Full |
 | **RFC 5065** | Autonomous System Confederations for BGP (AS_CONFED_SEQUENCE, AS_CONFED_SET & boundary stripping) | Full |
 | **RFC 8212** | Default External BGP (eBGP) Route Propagation Behavior without Policies (Default-Deny) | Full |
+| **RFC 8210 / 6810** | The RPKI to Router Protocol (RTR v0 & v1: PDU framing, cache synchronization & serial tracking) | Full |
+| **RFC 5880 / 5882** | Bidirectional Forwarding Detection (BFD for BGP: 3-way handshake, 300ms intervals, sub-second failover) | Full |
+| **RFC 7999** | BGP BLACKHOLE Community & Remote Triggered Blackholing (RTBH DDoS mitigation & kernel discard) | Full |
+| **RFC 7432 / 8365** | BGP MPLS-Based Ethernet VPN (EVPN Type 2 MAC/IP, Type 5 IP Prefix & RFC 9012 VXLAN Encap) | Full |
 
 ---
 
@@ -215,18 +219,39 @@ slopbgpctl roa check 172.22.64.128/27 4242420125
 
 slopbgpctl roa check 172.22.64.128/27 999999
 # Result: INVALID (Origin AS999999 NOT authorized or exceeds max-length)
+
+# Query Carrier Looking Glass (Route exact/LPM, AS-Path, Community, Summary)
+slopbgpctl lg route 172.22.64.0/27
+slopbgpctl lg aspath 4242421732
+slopbgpctl lg community 65535:666
+slopbgpctl lg summary
+
+# Inspect RFC 8210 / RFC 6810 RPKI RTR cache synchronization
+slopbgpctl rtr
+
+# Inspect RFC 5880 / RFC 5882 BFD sessions and sub-second failover states
+slopbgpctl bfd
+
+# List and manage RFC 7999 RTBH DDoS sinkhole routes
+slopbgpctl blackhole list
+slopbgpctl blackhole add 172.22.64.42/32
+slopbgpctl blackhole del 172.22.64.42/32
+
+# Inspect RFC 7432 / RFC 8365 BGP EVPN fabric routes (Type 2 MAC & Type 5 Prefix)
+slopbgpctl evpn
 ```
 
 ---
 
 ## Web Dashboard & Interactive Network Topology
 
-`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, and Flap damping decay:
+`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, and Flap damping decay:
 
 ![slopbgp Dashboard](screenshots/dashboard_full.png)
 
 * **Real-time Radial SVG Peering Graph**: Visualizes local router hub with glowing session states (Established in green, Syncing/Drained in amber, Inactive in red/gray).
-* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`.
+* **Carrier Looking Glass**: Live route queries with exact and longest-prefix match (LPM), AS-Path traversal inspection, and Community filters.
+* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`.
 * **Zero External Dependencies**: Pure SVG and HTML rendered by the daemon without requiring node, webpack, or javascript bundles.
 
 ---

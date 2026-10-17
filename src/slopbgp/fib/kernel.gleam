@@ -1,6 +1,8 @@
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
+import gleam/string
+import slopbgp/bgp/blackhole.{has_blackhole_community}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/types.{type Route}
 
@@ -10,6 +12,7 @@ pub type FibEntry {
     next_hop_str: String,
     metric: Int,
     peer_id: String,
+    is_blackhole: Bool,
   )
 }
 
@@ -38,12 +41,14 @@ pub fn sync_fib(fib: FibState, desired_routes: List(Route)) -> FibState {
     list.fold(desired_routes, dict.new(), fn(acc, route) {
       let p_str = prefix_to_string(route.prefix)
       let nh_str = ip_to_string(route.next_hop)
+      let bh = has_blackhole_community(route.communities)
       let entry =
         FibEntry(
           prefix_str: p_str,
           next_hop_str: nh_str,
           metric: route.med,
           peer_id: route.peer_id,
+          is_blackhole: bh,
         )
       dict.insert(acc, p_str, entry)
     })
@@ -106,12 +111,42 @@ pub fn get_installed_entries(fib: FibState) -> List(FibEntry) {
 }
 
 pub fn fib_entry_to_string(entry: FibEntry) -> String {
-  entry.prefix_str
-  <> " via "
-  <> entry.next_hop_str
-  <> " (metric "
-  <> int.to_string(entry.metric)
-  <> ", peer "
-  <> entry.peer_id
-  <> ")"
+  case entry.is_blackhole {
+    True ->
+      entry.prefix_str <> " [BLACKHOLE/DISCARD] (peer " <> entry.peer_id <> ")"
+    False ->
+      entry.prefix_str
+      <> " via "
+      <> entry.next_hop_str
+      <> " (metric "
+      <> int.to_string(entry.metric)
+      <> ", peer "
+      <> entry.peer_id
+      <> ")"
+  }
+}
+
+pub fn fib_entry_to_command(entry: FibEntry, table_id: Int) -> String {
+  let is_v6 = string.contains(entry.prefix_str, ":")
+  let cmd_prefix = case is_v6 {
+    True -> "ip -6 route replace "
+    False -> "ip route replace "
+  }
+  case entry.is_blackhole {
+    True ->
+      cmd_prefix
+      <> "blackhole "
+      <> entry.prefix_str
+      <> " table "
+      <> int.to_string(table_id)
+    False ->
+      cmd_prefix
+      <> entry.prefix_str
+      <> " via "
+      <> entry.next_hop_str
+      <> " metric "
+      <> int.to_string(entry.metric)
+      <> " table "
+      <> int.to_string(table_id)
+  }
 }

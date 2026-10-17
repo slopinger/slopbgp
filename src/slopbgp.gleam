@@ -49,7 +49,13 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["dashboard", ..]
     | ["metrics", ..]
     | ["policy", ..]
-    | ["roa", ..] -> run_ctl(args)
+    | ["roa", ..]
+    | ["rtr", ..]
+    | ["bfd", ..]
+    | ["blackhole", ..]
+    | ["evpn", ..]
+    | ["lg", ..]
+    | ["lookingglass", ..] -> run_ctl(args)
     ["daemon", ..] | [] -> run_daemon()
     _ -> {
       io.println(

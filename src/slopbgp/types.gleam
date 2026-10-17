@@ -12,12 +12,14 @@ pub type IpPrefix {
 pub type Afi {
   AfiIpv4
   AfiIpv6
+  AfiL2Vpn
   AfiUnknown(Int)
 }
 
 pub type Safi {
   SafiUnicast
   SafiMulticast
+  SafiEvpn
   SafiMplsVpn
   SafiFlowspec
   SafiUnknown(Int)
