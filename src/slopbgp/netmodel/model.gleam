@@ -6,7 +6,7 @@
 
 import gleam/dynamic/decode
 import gleam/json
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, None}
 import gleam/string
 import slopbgp/bgp/rfc9234.{format_role}
 import slopbgp/types.{
@@ -173,7 +173,7 @@ pub fn decode_network_model(
     use hostname <- decode.field("hostname", decode.string)
     use region_id <- decode.field("region_id", decode.string)
     use role_str <- decode.optional_field("role", "edge", decode.string)
-    use asn <- decode.optional_field("asn", 0, decode.int)
+    use asn <- decode.optional_field("asn", None, decode.optional(decode.int))
     use router_id <- decode.field("router_id", decode.string)
     use loopback_v4 <- decode.field("loopback_v4", decode.string)
     use loopback_v6 <- decode.field("loopback_v6", decode.string)
@@ -189,10 +189,7 @@ pub fn decode_network_model(
       hostname: hostname,
       region_id: region_id,
       role: string_to_node_role(role_str),
-      asn: case asn {
-        0 -> None
-        other -> Some(other)
-      },
+      asn: asn,
       router_id: router_id,
       loopback_v4: loopback_v4,
       loopback_v6: loopback_v6,
@@ -241,7 +238,11 @@ pub fn decode_network_model(
     use attached_router <- decode.field("attached_router", decode.string)
     use remote_as <- decode.field("remote_as", decode.int)
     use remote_ip <- decode.field("remote_ip", decode.string)
-    use local_ip <- decode.optional_field("local_ip", "", decode.string)
+    use local_ip <- decode.optional_field(
+      "local_ip",
+      None,
+      decode.optional(decode.string),
+    )
     use port <- decode.optional_field("port", 179, decode.int)
     use role_str <- decode.optional_field("bgp_role", "peer", decode.string)
     use import_policies <- decode.optional_field(
@@ -255,39 +256,37 @@ pub fn decode_network_model(
       decode.list(decode.string),
     )
     use bfd <- decode.optional_field("bfd", True, decode.bool)
-    use latency <- decode.optional_field("dn42_latency", 0, decode.int)
-    use bandwidth <- decode.optional_field("dn42_bandwidth", 0, decode.int)
-    use crypto <- decode.optional_field("dn42_crypto", 0, decode.int)
-    decode.success(
-      ExternalPeerDef(
-        id: id,
-        name: name,
-        attached_router: attached_router,
-        remote_as: remote_as,
-        remote_ip: remote_ip,
-        local_ip: case local_ip {
-          "" -> None
-          other -> Some(other)
-        },
-        port: port,
-        bgp_role: string_to_bgp_role(role_str),
-        import_policies: import_policies,
-        export_policies: export_policies,
-        bfd: bfd,
-        dn42_latency: case latency {
-          0 -> None
-          other -> Some(other)
-        },
-        dn42_bandwidth: case bandwidth {
-          0 -> None
-          other -> Some(other)
-        },
-        dn42_crypto: case crypto {
-          0 -> None
-          other -> Some(other)
-        },
-      ),
+    use latency <- decode.optional_field(
+      "dn42_latency",
+      None,
+      decode.optional(decode.int),
     )
+    use bandwidth <- decode.optional_field(
+      "dn42_bandwidth",
+      None,
+      decode.optional(decode.int),
+    )
+    use crypto <- decode.optional_field(
+      "dn42_crypto",
+      None,
+      decode.optional(decode.int),
+    )
+    decode.success(ExternalPeerDef(
+      id: id,
+      name: name,
+      attached_router: attached_router,
+      remote_as: remote_as,
+      remote_ip: remote_ip,
+      local_ip: local_ip,
+      port: port,
+      bgp_role: string_to_bgp_role(role_str),
+      import_policies: import_policies,
+      export_policies: export_policies,
+      bfd: bfd,
+      dn42_latency: latency,
+      dn42_bandwidth: bandwidth,
+      dn42_crypto: crypto,
+    ))
   }
 
   let model_decoder = {

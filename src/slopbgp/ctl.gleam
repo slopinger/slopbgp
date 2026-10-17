@@ -23,6 +23,7 @@ import slopbgp/lookingglass/lookingglass.{
 import slopbgp/net/socket.{now}
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
 import slopbgp/policy/filter.{dn42_default_import_policy}
 import slopbgp/rib/rib.{get_all_routes}
@@ -93,10 +94,20 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["vrf", ..] -> ctl_vrf_list()
     ["sr", ..] -> ctl_sr()
     ["unnumbered", ..] -> ctl_unnumbered()
+    ["netmodel", "compile", file_path, node_id, ..] ->
+      ctl_netmodel_compile_file(file_path, node_id)
     ["netmodel", "compile", node_id, ..] -> ctl_netmodel_compile(node_id)
+    ["netmodel", "graph", file_path, "mermaid", ..] ->
+      ctl_netmodel_graph_file(file_path, "mermaid")
     ["netmodel", "graph", "mermaid", ..] -> ctl_netmodel_graph("mermaid")
+    ["netmodel", "graph", "dot", ..] -> ctl_netmodel_graph("dot")
+    ["netmodel", "graph", file_path, ..] ->
+      ctl_netmodel_graph_file(file_path, "dot")
     ["netmodel", "graph", ..] -> ctl_netmodel_graph("dot")
     ["netmodel", "validate", file_path, ..] -> ctl_netmodel_validate(file_path)
+    ["netmodel", "sim", file_path, node_id, prefix, ..] ->
+      ctl_netmodel_sim_inject(file_path, node_id, prefix)
+    ["netmodel", "sim", file_path, ..] -> ctl_netmodel_sim(file_path)
     ["netmodel", ..] -> ctl_netmodel_summary()
     ["otc", ..] -> ctl_otc()
     ["bgpls", ..] -> ctl_bgpls()
@@ -1533,6 +1544,81 @@ fn ctl_netmodel_validate(file_path: String) -> Nil {
                 io.println("  - [" <> e.category <> "] " <> e.message)
               })
             }
+          }
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_netmodel_compile_file(file_path: String, node_id: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          case net_compiler.compile_router_config(model, node_id) {
+            Ok(cfg) -> io.println(net_compiler.daemon_config_to_json(cfg))
+            Error(err) -> io.println("Compilation error: " <> err)
+          }
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_netmodel_graph_file(file_path: String, fmt: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          case fmt {
+            "mermaid" -> io.println(net_compiler.to_mermaid_graph(model))
+            _ -> io.println(net_compiler.to_graphviz_dot(model))
+          }
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_netmodel_sim(file_path: String) -> Nil {
+  ctl_netmodel_sim_inject(file_path, "fra-edge1", "172.20.99.0/24")
+}
+
+fn ctl_netmodel_sim_inject(
+  file_path: String,
+  node_id: String,
+  prefix: String,
+) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let init_state = net_sim.init_sim(model)
+          let injection =
+            net_sim.SimRouteInjection(
+              target_node_id: node_id,
+              prefix: prefix,
+              origin_as: 4_242_420_001,
+              as_path: [4_242_420_001],
+              med: 10,
+              communities: [],
+              large_communities: [],
+              otc: None,
+            )
+          case net_sim.inject_route(init_state, injection) {
+            Ok(injected_state) -> {
+              let report =
+                net_sim.run_simulation_to_convergence(injected_state, 20)
+              io.println(net_sim.format_convergence_report(report))
+            }
+            Error(err) -> io.println("Injection error: " <> err)
           }
         }
         Error(err) -> io.println("JSON Parse error: " <> err)

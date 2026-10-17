@@ -1,0 +1,234 @@
+{
+  "name": "SlopNet Global Autonomous System",
+  "asn": 4242421732,
+  "regions": [
+    {
+      "id": "eu-central",
+      "name": "Frankfurt am Main",
+      "country": "DE",
+      "dn42_region": 41,
+      "lat": 50.1109,
+      "lon": 8.6821
+    },
+    {
+      "id": "us-east",
+      "name": "New York City",
+      "country": "US",
+      "dn42_region": 42,
+      "lat": 40.7128,
+      "lon": -74.006
+    },
+    {
+      "id": "ap-northeast",
+      "name": "Tokyo",
+      "country": "JP",
+      "dn42_region": 43,
+      "lat": 35.6762,
+      "lon": 139.6503
+    }
+  ],
+  "routers": [
+    {
+      "id": "fra-core1",
+      "hostname": "fra-core1.slopnet.internal",
+      "region_id": "eu-central",
+      "role": "route_reflector",
+      "asn": null,
+      "router_id": "172.20.10.1",
+      "loopback_v4": "172.20.10.1/32",
+      "loopback_v6": "fd42:d42:1732:10::1/128",
+      "bgp_port": 179,
+      "api_port": 8787,
+      "extra_tags": ["rr", "ixp-fabric", "tier1"]
+    },
+    {
+      "id": "fra-core2",
+      "hostname": "fra-core2.slopnet.internal",
+      "region_id": "eu-central",
+      "role": "route_reflector",
+      "asn": null,
+      "router_id": "172.20.10.2",
+      "loopback_v4": "172.20.10.2/32",
+      "loopback_v6": "fd42:d42:1732:10::2/128",
+      "bgp_port": 179,
+      "api_port": 8788,
+      "extra_tags": ["rr", "redundant"]
+    },
+    {
+      "id": "fra-edge1",
+      "hostname": "fra-edge1.slopnet.internal",
+      "region_id": "eu-central",
+      "role": "edge",
+      "asn": null,
+      "router_id": "172.20.10.11",
+      "loopback_v4": "172.20.10.11/32",
+      "loopback_v6": "fd42:d42:1732:10::11/128",
+      "bgp_port": 179,
+      "api_port": 8789,
+      "extra_tags": ["decix", "peering-edge"]
+    },
+    {
+      "id": "nyc-core1",
+      "hostname": "nyc-core1.slopnet.internal",
+      "region_id": "us-east",
+      "role": "route_reflector",
+      "asn": null,
+      "router_id": "172.20.20.1",
+      "loopback_v4": "172.20.20.1/32",
+      "loopback_v6": "fd42:d42:1732:20::1/128",
+      "bgp_port": 179,
+      "api_port": 8787,
+      "extra_tags": ["rr", "transatlantic"]
+    },
+    {
+      "id": "nyc-edge1",
+      "hostname": "nyc-edge1.slopnet.internal",
+      "region_id": "us-east",
+      "role": "edge",
+      "asn": null,
+      "router_id": "172.20.20.11",
+      "loopback_v4": "172.20.20.11/32",
+      "loopback_v6": "fd42:d42:1732:20::11/128",
+      "bgp_port": 179,
+      "api_port": 8789,
+      "extra_tags": ["nyix", "customer-edge"]
+    },
+    {
+      "id": "tyo-core1",
+      "hostname": "tyo-core1.slopnet.internal",
+      "region_id": "ap-northeast",
+      "role": "route_reflector",
+      "asn": null,
+      "router_id": "172.20.30.1",
+      "loopback_v4": "172.20.30.1/32",
+      "loopback_v6": "fd42:d42:1732:30::1/128",
+      "bgp_port": 179,
+      "api_port": 8787,
+      "extra_tags": ["rr", "transpacific"]
+    }
+  ],
+  "links": [
+    {
+      "id": "fra_intra_mesh",
+      "endpoint_a": "fra-core1",
+      "endpoint_b": "fra-core2",
+      "link_type": "wireguard",
+      "cost": 10,
+      "latency_ms": 1,
+      "bandwidth_mbps": 10000,
+      "bfd": true,
+      "ip_a": "172.20.10.1",
+      "ip_b": "172.20.10.2"
+    },
+    {
+      "id": "fra_core_edge",
+      "endpoint_a": "fra-core1",
+      "endpoint_b": "fra-edge1",
+      "link_type": "wireguard",
+      "cost": 10,
+      "latency_ms": 1,
+      "bandwidth_mbps": 10000,
+      "bfd": true,
+      "ip_a": "172.20.10.1",
+      "ip_b": "172.20.10.11"
+    },
+    {
+      "id": "transatlantic_fra_nyc",
+      "endpoint_a": "fra-core1",
+      "endpoint_b": "nyc-core1",
+      "link_type": "wireguard",
+      "cost": 75,
+      "latency_ms": 74,
+      "bandwidth_mbps": 1000,
+      "bfd": true,
+      "ip_a": "172.20.10.1",
+      "ip_b": "172.20.20.1"
+    },
+    {
+      "id": "nyc_core_edge",
+      "endpoint_a": "nyc-core1",
+      "endpoint_b": "nyc-edge1",
+      "link_type": "wireguard",
+      "cost": 10,
+      "latency_ms": 2,
+      "bandwidth_mbps": 10000,
+      "bfd": true,
+      "ip_a": "172.20.20.1",
+      "ip_b": "172.20.20.11"
+    },
+    {
+      "id": "transpacific_nyc_tyo",
+      "endpoint_a": "nyc-core1",
+      "endpoint_b": "tyo-core1",
+      "link_type": "wireguard",
+      "cost": 140,
+      "latency_ms": 138,
+      "bandwidth_mbps": 1000,
+      "bfd": true,
+      "ip_a": "172.20.20.1",
+      "ip_b": "172.20.30.1"
+    },
+    {
+      "id": "eurasia_fra_tyo",
+      "endpoint_a": "fra-core2",
+      "endpoint_b": "tyo-core1",
+      "link_type": "wireguard",
+      "cost": 210,
+      "latency_ms": 205,
+      "bandwidth_mbps": 500,
+      "bfd": true,
+      "ip_a": "172.20.10.2",
+      "ip_b": "172.20.30.1"
+    }
+  ],
+  "external_peers": [
+    {
+      "id": "fra_decix_ixp",
+      "name": "DE-CIX Frankfurt Bilateral Peering",
+      "attached_router": "fra-edge1",
+      "remote_as": 4242420001,
+      "remote_ip": "172.22.64.1",
+      "local_ip": null,
+      "port": 179,
+      "bgp_role": "peer",
+      "import_policies": ["import_dn42_valid", "drop_martians"],
+      "export_policies": ["export_own_prefixes"],
+      "bfd": true,
+      "dn42_latency": 4,
+      "dn42_bandwidth": 27,
+      "dn42_crypto": 34
+    },
+    {
+      "id": "nyc_upstream_transit",
+      "name": "Tier-1 Upstream Transit Provider",
+      "attached_router": "nyc-edge1",
+      "remote_as": 4242420002,
+      "remote_ip": "172.22.128.1",
+      "local_ip": null,
+      "port": 179,
+      "bgp_role": "provider",
+      "import_policies": ["import_full_tables"],
+      "export_policies": ["export_customer_routes"],
+      "bfd": true,
+      "dn42_latency": 12,
+      "dn42_bandwidth": 28,
+      "dn42_crypto": 34
+    },
+    {
+      "id": "nyc_customer_datacenter",
+      "name": "SlopBox Managed Hosting Client",
+      "attached_router": "nyc-edge1",
+      "remote_as": 4242420003,
+      "remote_ip": "172.20.99.2",
+      "local_ip": null,
+      "port": 179,
+      "bgp_role": "customer",
+      "import_policies": ["import_customer_only"],
+      "export_policies": ["export_default_and_tables"],
+      "bfd": true,
+      "dn42_latency": 2,
+      "dn42_bandwidth": 28,
+      "dn42_crypto": 34
+    }
+  ]
+}

@@ -40,6 +40,7 @@ import slopbgp/bmp/message as bmp_message
 import slopbgp/config
 import slopbgp/dn42/filter.{is_bogon, is_valid_dn42_network}
 import slopbgp/dn42/roa.{parse_roa_line, validate_route}
+import slopbgp/filter/hygiene
 import slopbgp/filter/pipeline as slop_pipeline
 import slopbgp/ip.{
   decode_prefixes_ipv4, encode_prefix, ip_to_string, is_prefix_contained,
@@ -49,6 +50,7 @@ import slopbgp/lookingglass/lookingglass as lg
 import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
 import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
+import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
 import slopbgp/policy/filter as policy_filter
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
@@ -2371,4 +2373,323 @@ pub fn global_network_model_compiler_test() {
   string.contains(mermaid, "subgraph fra") |> should.equal(True)
   string.contains(mermaid, "fra-rr-1 <-->|2ms| fra-edge-1")
   |> should.equal(True)
+}
+
+// 38. RFC 7938 / RFC 7454 BGP Route Hygiene & Bogon/Martian Filter Engine
+pub fn bgp_route_hygiene_test() {
+  // 1. Martian ASN detection
+  hygiene.is_martian_asn(0) |> should.equal(True)
+  hygiene.is_martian_asn(23_456) |> should.equal(True)
+  hygiene.is_martian_asn(64_500) |> should.equal(True)
+  hygiene.is_martian_asn(65_535) |> should.equal(True)
+  hygiene.is_martian_asn(65_540) |> should.equal(True)
+  hygiene.is_martian_asn(4_294_967_295) |> should.equal(True)
+  hygiene.is_martian_asn(4_242_421_732) |> should.equal(False)
+
+  // 2. Bogon prefix detection (RFC 6890)
+  let assert Ok(p_loop) = parse_prefix("127.0.0.1/32")
+  let assert Ok(p_cgnat) = parse_prefix("100.64.1.0/24")
+  let assert Ok(p_mc) = parse_prefix("224.0.0.1/32")
+  let assert Ok(p_v6_doc) = parse_prefix("2001:db8::/32")
+  let assert Ok(p_v6_ll) = parse_prefix("fe80::1/128")
+  let assert Ok(p_dn42) = parse_prefix("172.20.99.0/24")
+  let assert Ok(p_dn42_v6) = parse_prefix("fd42:d42:1732::/48")
+
+  hygiene.is_bogon_prefix(p_loop) |> should.equal(True)
+  hygiene.is_bogon_prefix(p_cgnat) |> should.equal(True)
+  hygiene.is_bogon_prefix(p_mc) |> should.equal(True)
+  hygiene.is_bogon_prefix(p_v6_doc) |> should.equal(True)
+  hygiene.is_bogon_prefix(p_v6_ll) |> should.equal(True)
+
+  // 3. DN42 address space compliance
+  hygiene.is_valid_dn42_space(p_dn42) |> should.equal(True)
+  hygiene.is_valid_dn42_space(p_dn42_v6) |> should.equal(True)
+  hygiene.is_valid_dn42_space(p_loop) |> should.equal(False)
+
+  // 4. Validate route hygiene
+  let cfg = hygiene.default_dn42_hygiene()
+  let valid_rt =
+    Route(
+      prefix: p_dn42,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_420_001, 4_242_420_002])],
+      next_hop: Ipv4(172, 20, 10, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer1",
+      timestamp: 0,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  // Valid DN42 route passes
+  hygiene.validate_route_hygiene(valid_rt, cfg, Some(4_242_420_001))
+  |> should.be_ok
+
+  // First-AS mismatch rejected
+  hygiene.validate_route_hygiene(valid_rt, cfg, Some(4_242_429_999))
+  |> should.be_error
+
+  // Excessive prepending rejected
+  let prepended_rt =
+    Route(..valid_rt, as_path: [AsSequence(list.repeat(4_242_420_001, 8))])
+  hygiene.validate_route_hygiene(prepended_rt, cfg, Some(4_242_420_001))
+  |> should.be_error
+
+  // Martian ASN in path rejected
+  let martian_rt =
+    Route(..valid_rt, as_path: [AsSequence([4_242_420_001, 0, 4_242_420_002])])
+  hygiene.validate_route_hygiene(martian_rt, cfg, Some(4_242_420_001))
+  |> should.be_error
+}
+
+// 39. SlopFilter Route Hygiene Pipeline Integration
+pub fn slopfilter_hygiene_pipeline_test() {
+  let assert Ok(p_bogon) = parse_prefix("10.0.0.0/8")
+  let assert Ok(p_dn42) = parse_prefix("172.20.50.0/24")
+  let cfg = hygiene.default_dn42_hygiene()
+
+  let bogon_rt =
+    Route(
+      prefix: p_bogon,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_420_001])],
+      next_hop: Ipv4(10, 0, 0, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer1",
+      timestamp: 0,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let clean_rt = Route(..bogon_rt, prefix: p_dn42)
+
+  let pipeline =
+    slop_pipeline.FilterPipeline(
+      name: "hygiene_filter",
+      rules: [
+        slop_pipeline.FilterRule(
+          name: "drop_hygiene_violations",
+          matches: [slop_pipeline.MatchHygieneViolation(cfg)],
+          actions: [slop_pipeline.ActionReject("Route hygiene violation")],
+        ),
+      ],
+      default_action: slop_pipeline.ActionAccept,
+    )
+
+  let res_bogon = slop_pipeline.execute_pipeline(pipeline, bogon_rt)
+  res_bogon.accepted |> should.equal(False)
+
+  let res_clean = slop_pipeline.execute_pipeline(pipeline, clean_rt)
+  res_clean.accepted |> should.equal(True)
+}
+
+// 40. Multi-Router Global Network Topology Simulation & Convergence Engine
+pub fn global_network_model_simulation_test() {
+  let reg_eu = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let reg_us = net_model.Region("us", "New York", "US", 42, 40.71, -74.0)
+
+  let r_core1 =
+    net_model.RouterNode(
+      id: "fra-core1",
+      hostname: "fra-core1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+  let r_edge1 =
+    net_model.RouterNode(
+      id: "fra-edge1",
+      hostname: "fra-edge1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.20.10.11",
+      loopback_v4: "172.20.10.11/32",
+      loopback_v6: "fd42::11/128",
+      bgp_port: 179,
+      api_port: 8788,
+      extra_tags: [],
+    )
+  let r_nyc1 =
+    net_model.RouterNode(
+      id: "nyc-core1",
+      hostname: "nyc-core1.slopnet",
+      region_id: "us",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.20.1",
+      loopback_v4: "172.20.20.1/32",
+      loopback_v6: "fd42::21/128",
+      bgp_port: 179,
+      api_port: 8789,
+      extra_tags: [],
+    )
+
+  let link_fra =
+    net_model.InterRouterLink(
+      id: "fra_internal",
+      endpoint_a: "fra-core1",
+      endpoint_b: "fra-edge1",
+      link_type: net_model.LinkWireGuard,
+      cost: 10,
+      latency_ms: 2,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.10.11",
+    )
+  let link_wan =
+    net_model.InterRouterLink(
+      id: "wan_transatlantic",
+      endpoint_a: "fra-core1",
+      endpoint_b: "nyc-core1",
+      link_type: net_model.LinkWireGuard,
+      cost: 75,
+      latency_ms: 70,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.20.1",
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "slopnet-test",
+      asn: 4_242_421_732,
+      regions: [reg_eu, reg_us],
+      routers: [r_core1, r_edge1, r_nyc1],
+      links: [link_fra, link_wan],
+      external_peers: [],
+    )
+
+  let init_state = net_sim.init_sim(model)
+  let injection =
+    net_sim.SimRouteInjection(
+      target_node_id: "fra-edge1",
+      prefix: "172.20.77.0/24",
+      origin_as: 4_242_420_001,
+      as_path: [4_242_420_001],
+      med: 10,
+      communities: [],
+      large_communities: [],
+      otc: None,
+    )
+
+  let assert Ok(injected_state) = net_sim.inject_route(init_state, injection)
+  let report = net_sim.run_simulation_to_convergence(injected_state, 10)
+
+  // Network must converge in discrete simulation steps
+  report.converged |> should.equal(True)
+  report.total_steps |> should.equal(3)
+  list.length(report.detected_leaks) |> should.equal(0)
+
+  // Every router in the network must have the route
+  let assert Ok(fra_core_summary) =
+    list.find(report.node_rib_summaries, fn(s) { s.node_id == "fra-core1" })
+  fra_core_summary.route_count |> should.equal(1)
+
+  let assert Ok(nyc_core_summary) =
+    list.find(report.node_rib_summaries, fn(s) { s.node_id == "nyc-core1" })
+  nyc_core_summary.route_count |> should.equal(1)
+
+  // Report JSON serialization check
+  let json_rep = net_sim.convergence_report_to_json(report)
+  string.contains(json_rep, "\"converged\":true") |> should.equal(True)
+  string.contains(json_rep, "172.20.77.0/24") |> should.equal(True)
+
+  // Report CLI formatting check
+  let cli_rep = net_sim.format_convergence_report(report)
+  string.contains(cli_rep, "Status: CONVERGED in 3 steps") |> should.equal(True)
+}
+
+// 41. RFC 9234 Route Leak Detection in Multi-Router Topology Simulation
+pub fn global_network_simulation_route_leak_test() {
+  let reg = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let r_edge =
+    net_model.RouterNode(
+      id: "fra-edge",
+      hostname: "edge.slopnet",
+      region_id: "eu",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+  let ext_provider =
+    net_model.ExternalPeerDef(
+      id: "peer-upstream",
+      name: "Upstream Transit",
+      attached_router: "fra-edge",
+      remote_as: 4_242_420_099,
+      remote_ip: "172.22.1.1",
+      local_ip: None,
+      port: 179,
+      bgp_role: RoleProvider,
+      import_policies: [],
+      export_policies: [],
+      bfd: False,
+      dn42_latency: None,
+      dn42_bandwidth: None,
+      dn42_crypto: None,
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "slopnet-leak-test",
+      asn: 4_242_421_732,
+      regions: [reg],
+      routers: [r_edge],
+      links: [],
+      external_peers: [ext_provider],
+    )
+
+  let init_state = net_sim.init_sim(model)
+
+  // Route learned from another peer/provider with OTC AS4242420088
+  let leak_injection =
+    net_sim.SimRouteInjection(
+      target_node_id: "fra-edge",
+      prefix: "172.20.88.0/24",
+      origin_as: 4_242_420_001,
+      as_path: [4_242_420_088, 4_242_420_001],
+      med: 0,
+      communities: [],
+      large_communities: [],
+      otc: Some(4_242_420_088),
+    )
+
+  let assert Ok(injected) = net_sim.inject_route(init_state, leak_injection)
+  let #(stepped, _) = net_sim.sim_step(injected)
+
+  // The simulator must catch the attempt to leak this OTC route to RoleProvider
+  list.length(stepped.leaks_detected) |> should.equal(1)
+  let assert [leak] = stepped.leaks_detected
+  leak.otc_as |> should.equal(4_242_420_088)
+  string.contains(leak.reason, "RFC 9234 route leak") |> should.equal(True)
 }

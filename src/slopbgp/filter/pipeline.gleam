@@ -10,6 +10,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/string
 import slopbgp/bgp/rfc9234.{get_otc}
 import slopbgp/dn42/filter.{is_valid_dn42_network}
+import slopbgp/filter/hygiene.{type RouteHygieneConfig, validate_route_hygiene}
 import slopbgp/ip.{is_prefix_contained}
 import slopbgp/types.{
   type AsPathSegment, type Community, type IpAddress, type IpPrefix,
@@ -50,12 +51,14 @@ pub type FilterMatch {
   MatchDn42Latency(max_ms: Int)
   MatchDn42Region(region_code: Int)
   MatchOtcLeak(ingress_as: Int)
+  MatchHygieneViolation(config: RouteHygieneConfig)
 }
 
 pub type FilterAction {
   ActionAccept
   ActionReject(reason: String)
   ActionNextRule
+  ActionEnforceHygiene(config: RouteHygieneConfig)
   ActionSetLocalPref(Int)
   ActionAddLocalPref(Int)
   ActionSubLocalPref(Int)
@@ -176,6 +179,12 @@ pub fn matches_condition(route: Route, match_cond: FilterMatch) -> Bool {
       case get_otc(route) {
         Some(otc_as) -> otc_as != ingress_as
         None -> False
+      }
+
+    MatchHygieneViolation(cfg) ->
+      case validate_route_hygiene(route, cfg, None) {
+        Ok(_) -> False
+        Error(_) -> True
       }
   }
 }
@@ -335,6 +344,11 @@ fn apply_actions(
           ActionAccept -> #(rt, Some(#(True, None)))
           ActionReject(reason) -> #(rt, Some(#(False, Some(reason))))
           ActionNextRule -> #(rt, None)
+          ActionEnforceHygiene(cfg) ->
+            case validate_route_hygiene(rt, cfg, None) {
+              Ok(clean_rt) -> #(clean_rt, None)
+              Error(err) -> #(rt, Some(#(False, Some(err))))
+            }
           ActionSetLocalPref(lp) -> #(Route(..rt, local_pref: lp), None)
           ActionAddLocalPref(delta) -> #(
             Route(..rt, local_pref: rt.local_pref + delta),
