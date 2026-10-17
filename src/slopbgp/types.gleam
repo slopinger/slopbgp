@@ -34,12 +34,22 @@ pub type BgpRole {
   RoleUnknown(Int)
 }
 
+pub type LlgrAfiSafi {
+  LlgrAfiSafi(
+    afi: Afi,
+    safi: Safi,
+    forwarding_preserved: Bool,
+    stale_time_seconds: Int,
+  )
+}
+
 pub type BgpCapability {
   CapMultiProtocol(afi: Afi, safi: Safi)
   CapRouteRefresh
   CapExtendedNextHop(nlri_afi: Afi, nlri_safi: Safi, next_hop_afi: Afi)
   CapBgpRole(role: BgpRole)
   CapGracefulRestart(flags: Int, time: Int, afi_safi: List(#(Afi, Safi, Int)))
+  CapLongLivedGracefulRestart(families: List(LlgrAfiSafi))
   CapFourOctetAsn(asn: Int)
   CapAddPath(afi: Afi, safi: Safi, send: Bool, receive: Bool)
   CapEnhancedRouteRefresh

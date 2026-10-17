@@ -14,6 +14,7 @@ import slopbgp/bgp/blackhole.{
 import slopbgp/bgp/evpn.{RdAsn4}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/bgp/l3vpn.{RtAsn4, route_target_to_string}
+import slopbgp/bgp/llgr
 import slopbgp/config.{load_config_file}
 import slopbgp/dn42/roa.{parse_roa_content, validate_route}
 import slopbgp/fib/kernel.{FibEntry}
@@ -27,6 +28,7 @@ import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
+import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter.{dn42_default_import_policy}
 import slopbgp/rib/rib.{get_all_routes}
 import slopbgp/rtr/client.{new_rtr_client}
@@ -108,6 +110,14 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["netmodel", "graph", ..] -> ctl_netmodel_graph("dot")
     ["netmodel", "validate", file_path, ..] -> ctl_netmodel_validate(file_path)
     ["netmodel", "audit", file_path, ..] -> ctl_netmodel_audit(file_path)
+    ["netmodel", "whatif", file_path, "fail-node", node_id, ..] ->
+      ctl_netmodel_whatif(file_path, net_whatif.ScenarioFailNode(node_id))
+    ["netmodel", "whatif", file_path, "fail-link", link_id, ..] ->
+      ctl_netmodel_whatif(file_path, net_whatif.ScenarioFailLink(link_id))
+    ["netmodel", "whatif", file_path, "drain-node", node_id, ..] ->
+      ctl_netmodel_whatif(file_path, net_whatif.ScenarioDrainNode(node_id))
+    ["netmodel", "whatif", file_path, ..] ->
+      ctl_netmodel_whatif_default(file_path)
     ["netmodel", "sim", file_path, node_id, prefix, ..] ->
       ctl_netmodel_sim_inject(file_path, node_id, prefix)
     ["netmodel", "sim", file_path, ..] -> ctl_netmodel_sim(file_path)
@@ -115,6 +125,7 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["otc", ..] -> ctl_otc()
     ["aspa", "verify", ..as_path_strs] -> ctl_aspa_verify(as_path_strs)
     ["aspa", ..] -> ctl_aspa()
+    ["llgr", ..] -> ctl_llgr()
     ["bgpls", ..] -> ctl_bgpls()
     ["filter", ..] -> ctl_filter()
     _ -> print_usage()
@@ -989,6 +1000,12 @@ fn print_usage() -> Nil {
   io.println(
     "  slopbgpctl unnumbered          Show RFC 5549/8950 BGP Unnumbered link-local peers",
   )
+  io.println(
+    "  slopbgpctl netmodel whatif <file> [fail-node <id>|fail-link <id>|drain-node <id>]",
+  )
+  io.println(
+    "  slopbgpctl llgr                Show RFC 8538 Long-Lived Graceful Restart status",
+  )
 }
 
 fn ctl_rtr() -> Nil {
@@ -1736,4 +1753,77 @@ fn ctl_filter() -> Nil {
   io.println("│   - Rule 2: Strip private ASNs from AS_PATH            │")
   io.println("│   - Rule 3: Inject RFC 9234 OTC tag                    │")
   io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_llgr() -> Nil {
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ RFC 8538 BGP Long-Lived Graceful Restart (LLGR)        │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println(
+    "│ Capability Code: "
+    <> int.to_string(llgr.capability_code_llgr)
+    <> " (Long-Lived Graceful Restart)       │",
+  )
+  io.println("│ Communities:                                           │")
+  io.println(
+    "│   - "
+    <> int.to_string(llgr.llgr_stale_asn)
+    <> ":"
+    <> int.to_string(llgr.llgr_stale_val)
+    <> " (LLGR_STALE) - Depressed LocalPref route   │",
+  )
+  io.println(
+    "│   - "
+    <> int.to_string(llgr.no_llgr_asn)
+    <> ":"
+    <> int.to_string(llgr.no_llgr_val)
+    <> " (NO_LLGR)   - Route must not be retained   │",
+  )
+  io.println("│ Default Stale Time: 86,400s (24 hours)                 │")
+  io.println("│ Stale LocalPref:    0 (Fallback only)                  │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Status: Active & Negotiated across iBGP Mesh           │")
+  io.println("└────────────────────────────────────────────────────────┘")
+}
+
+fn ctl_netmodel_whatif(
+  file_path: String,
+  scenario: net_whatif.WhatIfScenario,
+) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          let report = net_whatif.run_whatif(model, scenario)
+          io.println(net_whatif.format_whatif_report(report))
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
+}
+
+fn ctl_netmodel_whatif_default(file_path: String) -> Nil {
+  case simplifile.read(file_path) {
+    Ok(content) -> {
+      case net_model.decode_network_model(content) {
+        Ok(model) -> {
+          case model.routers {
+            [first, ..] -> {
+              let report =
+                net_whatif.run_whatif(
+                  model,
+                  net_whatif.ScenarioFailNode(first.id),
+                )
+              io.println(net_whatif.format_whatif_report(report))
+            }
+            [] -> io.println("Network model has no routers to simulate.")
+          }
+        }
+        Error(err) -> io.println("JSON Parse error: " <> err)
+      }
+    }
+    Error(_) -> io.println("Could not read file: " <> file_path)
+  }
 }

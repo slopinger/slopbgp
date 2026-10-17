@@ -27,6 +27,7 @@ import slopbgp/bgp/graceful_shutdown.{
   graceful_shutdown_community, has_graceful_shutdown,
 }
 import slopbgp/bgp/l3vpn
+import slopbgp/bgp/llgr
 import slopbgp/bgp/message.{decode_message, encode_message}
 import slopbgp/bgp/prefix_sid
 import slopbgp/bgp/rfc8212
@@ -54,6 +55,7 @@ import slopbgp/netmodel/compiler as net_compiler
 import slopbgp/netmodel/model as net_model
 import slopbgp/netmodel/sim as net_sim
 import slopbgp/netmodel/validator as net_validator
+import slopbgp/netmodel/whatif as net_whatif
 import slopbgp/policy/filter as policy_filter
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/routeserver/routeserver
@@ -68,10 +70,11 @@ import slopbgp/types.{
   AttrMpReachNlri, AttrNextHop, AttrOrigin, AttrOriginatorId, BmpMsgInitiation,
   BmpMsgPeerDown, BmpMsgRouteMonitoring, BmpMsgStatsReport, BmpMsgTermination,
   BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
-  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapMultiProtocol,
-  CapRouteRefresh, Community, FlowActionDrop, FlowDstPort, FlowDstPrefix,
-  FlowIpProtocol, FlowLabel, FlowNextHeader, FlowSrcPrefix, FlowspecRule,
-  IpPrefix, Ipv4, Ipv6, LargeCommunity, MatchAsPathContains, MsgKeepalive,
+  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn,
+  CapLongLivedGracefulRestart, CapMultiProtocol, CapRouteRefresh, Community,
+  FlowActionDrop, FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowLabel,
+  FlowNextHeader, FlowSrcPrefix, FlowspecRule, IpPrefix, Ipv4, Ipv6,
+  LargeCommunity, LlgrAfiSafi, MatchAsPathContains, MsgKeepalive,
   MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig, PolicyChain,
   PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer, RolePeer,
   RoleProvider, RoleRouteServer, RoleRouteServerClient, Route, SafiUnicast,
@@ -2852,4 +2855,175 @@ pub fn netmodel_resilience_audit_test() {
 
   let cli_rep = net_audit.format_audit_report(report)
   string.contains(cli_rep, "Health Score: 90/100") |> should.equal(True)
+}
+
+// 44. RFC 8538 Long-Lived Graceful Restart (LLGR)
+pub fn llgr_graceful_restart_test() {
+  // 1. LLGR Capability Code 71 encoding & decoding
+  let fam_v4 =
+    LlgrAfiSafi(
+      afi: AfiIpv4,
+      safi: SafiUnicast,
+      forwarding_preserved: True,
+      stale_time_seconds: 86_400,
+    )
+  let fam_v6 =
+    LlgrAfiSafi(
+      afi: AfiIpv6,
+      safi: SafiUnicast,
+      forwarding_preserved: True,
+      stale_time_seconds: 3600,
+    )
+  let cap = CapLongLivedGracefulRestart([fam_v4, fam_v6])
+  let bin = encode_capability(cap)
+  let decoded = decode_capabilities(bin)
+  decoded |> should.equal([cap])
+
+  // 2. LLGR Communities
+  llgr.llgr_stale_community() |> should.equal(Community(65_535, 1))
+  llgr.no_llgr_community() |> should.equal(Community(65_535, 2))
+
+  // 3. Mark route stale with LocalPref depression
+  let assert Ok(pfx) = parse_prefix("172.22.64.0/27")
+  let r =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "test_peer",
+      timestamp: 0,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let assert Ok(stale_r) = llgr.mark_route_stale(r, 0)
+  stale_r.local_pref |> should.equal(0)
+  llgr.has_llgr_stale(stale_r) |> should.equal(True)
+
+  // 4. Route unmarking when peer recovers
+  let recovered_r = llgr.unmark_route_stale(stale_r, 100)
+  recovered_r.local_pref |> should.equal(100)
+  llgr.has_llgr_stale(recovered_r) |> should.equal(False)
+
+  // 5. NO_LLGR community prevents route retention
+  let no_llgr_r = Route(..r, communities: [llgr.no_llgr_community()])
+  llgr.has_no_llgr(no_llgr_r) |> should.equal(True)
+  llgr.mark_route_stale(no_llgr_r, 0) |> should.be_error()
+}
+
+// 45. What-If Blast Radius & Network Resilience Simulation Engine
+pub fn netmodel_whatif_blast_radius_test() {
+  let reg_eu = net_model.Region("eu", "Frankfurt", "DE", 41, 50.11, 8.68)
+  let reg_us = net_model.Region("us", "New York", "US", 42, 40.71, -74.0)
+
+  let r_core1 =
+    net_model.RouterNode(
+      id: "fra-core1",
+      hostname: "fra-core1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.10.1",
+      loopback_v4: "172.20.10.1/32",
+      loopback_v6: "fd42::1/128",
+      bgp_port: 179,
+      api_port: 8787,
+      extra_tags: [],
+    )
+  let r_core2 =
+    net_model.RouterNode(
+      id: "nyc-core1",
+      hostname: "nyc-core1.slopnet",
+      region_id: "us",
+      role: net_model.RoleRouteReflector,
+      asn: None,
+      router_id: "172.20.20.1",
+      loopback_v4: "172.20.20.1/32",
+      loopback_v6: "fd42::21/128",
+      bgp_port: 179,
+      api_port: 8789,
+      extra_tags: [],
+    )
+  let r_edge1 =
+    net_model.RouterNode(
+      id: "fra-edge1",
+      hostname: "fra-edge1.slopnet",
+      region_id: "eu",
+      role: net_model.RoleEdge,
+      asn: None,
+      router_id: "172.20.10.11",
+      loopback_v4: "172.20.10.11/32",
+      loopback_v6: "fd42::11/128",
+      bgp_port: 179,
+      api_port: 8788,
+      extra_tags: [],
+    )
+
+  let link_local =
+    net_model.InterRouterLink(
+      id: "fra_local",
+      endpoint_a: "fra-core1",
+      endpoint_b: "fra-edge1",
+      link_type: net_model.LinkWireGuard,
+      cost: 10,
+      latency_ms: 2,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.10.11",
+    )
+  let link_wan =
+    net_model.InterRouterLink(
+      id: "wan_fra_nyc",
+      endpoint_a: "fra-core1",
+      endpoint_b: "nyc-core1",
+      link_type: net_model.LinkWireGuard,
+      cost: 75,
+      latency_ms: 70,
+      bandwidth_mbps: 1000,
+      bfd: True,
+      ip_a: "172.20.10.1",
+      ip_b: "172.20.20.1",
+    )
+
+  let model =
+    net_model.GlobalNetworkModel(
+      name: "whatif-test-net",
+      asn: 4_242_421_732,
+      regions: [reg_eu, reg_us],
+      routers: [r_core1, r_core2, r_edge1],
+      links: [link_local, link_wan],
+      external_peers: [],
+    )
+
+  // 1. Simulate failure of inter-region WAN link
+  let report_link =
+    net_whatif.run_whatif(model, net_whatif.ScenarioFailLink("wan_fra_nyc"))
+  string.contains(report_link.scenario_description, "wan_fra_nyc")
+  |> should.equal(True)
+  { report_link.blast_radius_score >= 0 } |> should.equal(True)
+
+  // 2. Simulate failure of edge node
+  let report_node =
+    net_whatif.run_whatif(model, net_whatif.ScenarioFailNode("fra-edge1"))
+  string.contains(report_node.scenario_description, "fra-edge1")
+  |> should.equal(True)
+
+  // 3. Serialization and formatting
+  let json_rep = net_whatif.whatif_report_to_json(report_link)
+  string.contains(json_rep, "\"blast_radius_score\"") |> should.equal(True)
+
+  let cli_rep = net_whatif.format_whatif_report(report_link)
+  string.contains(cli_rep, "slopbgp // What-If Blast Radius")
+  |> should.equal(True)
 }

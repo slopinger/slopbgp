@@ -1,11 +1,13 @@
+import gleam/int
 import gleam/list
 import slopbgp/types.{
-  type Afi, type BgpCapability, type BgpRole, type Safi, AfiIpv4, AfiIpv6,
-  AfiL2Vpn, AfiUnknown, CapAddPath, CapBgpRole, CapEnhancedRouteRefresh,
-  CapExtendedMessage, CapExtendedNextHop, CapFourOctetAsn, CapGracefulRestart,
-  CapMultiProtocol, CapRouteRefresh, CapUnknown, RoleCustomer, RolePeer,
-  RoleProvider, RoleRouteServer, RoleRouteServerClient, RoleUnknown, SafiEvpn,
-  SafiFlowspec, SafiMplsVpn, SafiMulticast, SafiUnicast, SafiUnknown,
+  type Afi, type BgpCapability, type BgpRole, type LlgrAfiSafi, type Safi,
+  AfiIpv4, AfiIpv6, AfiL2Vpn, AfiUnknown, CapAddPath, CapBgpRole,
+  CapEnhancedRouteRefresh, CapExtendedMessage, CapExtendedNextHop,
+  CapFourOctetAsn, CapGracefulRestart, CapLongLivedGracefulRestart,
+  CapMultiProtocol, CapRouteRefresh, CapUnknown, LlgrAfiSafi, RoleCustomer,
+  RolePeer, RoleProvider, RoleRouteServer, RoleRouteServerClient, RoleUnknown,
+  SafiEvpn, SafiFlowspec, SafiMplsVpn, SafiMulticast, SafiUnicast, SafiUnknown,
 }
 
 pub fn afi_to_int(afi: Afi) -> Int {
@@ -101,6 +103,31 @@ pub fn encode_capability(cap: BgpCapability) -> BitArray {
       let len = byte_size(val)
       <<64:8, len:8, val:bits>>
     }
+    CapLongLivedGracefulRestart(families) -> {
+      let entries =
+        list.map(families, fn(fam) {
+          let flags = case fam.forwarding_preserved {
+            True -> 0x80
+            False -> 0x00
+          }
+          let stale_time = fam.stale_time_seconds
+          let b1 =
+            int.bitwise_and(int.bitwise_shift_right(stale_time, 16), 0xFF)
+          let b2 = int.bitwise_and(int.bitwise_shift_right(stale_time, 8), 0xFF)
+          let b3 = int.bitwise_and(stale_time, 0xFF)
+          <<
+            { afi_to_int(fam.afi) }:16,
+            { safi_to_int(fam.safi) }:8,
+            flags:8,
+            b1:8,
+            b2:8,
+            b3:8,
+          >>
+        })
+      let val = list.fold(entries, <<>>, fn(acc, b) { <<acc:bits, b:bits>> })
+      let len = byte_size(val)
+      <<71:8, len:8, val:bits>>
+    }
     CapFourOctetAsn(asn) -> <<65:8, 4:8, asn:32>>
     CapAddPath(afi, safi, send, receive) -> {
       let flag = case send, receive {
@@ -163,8 +190,37 @@ fn decode_single_capability(code: Int, val: BitArray) -> BgpCapability {
       CapAddPath(int_to_afi(afi), int_to_safi(safi), send, receive)
     }
     70, <<>> -> CapEnhancedRouteRefresh
+    71, entries_bin -> {
+      let entries = decode_llgr_entries(entries_bin, [])
+      CapLongLivedGracefulRestart(entries)
+    }
     74, <<>> -> CapExtendedMessage
     _, _ -> CapUnknown(code, val)
+  }
+}
+
+fn decode_llgr_entries(
+  bytes: BitArray,
+  acc: List(LlgrAfiSafi),
+) -> List(LlgrAfiSafi) {
+  case bytes {
+    <<afi:16, safi:8, flags:8, b1:8, b2:8, b3:8, rest:bits>> -> {
+      let f_preserved = int.bitwise_and(flags, 0x80) != 0
+      let stale_time =
+        int.bitwise_or(
+          int.bitwise_shift_left(b1, 16),
+          int.bitwise_or(int.bitwise_shift_left(b2, 8), b3),
+        )
+      let fam =
+        LlgrAfiSafi(
+          afi: int_to_afi(afi),
+          safi: int_to_safi(safi),
+          forwarding_preserved: f_preserved,
+          stale_time_seconds: stale_time,
+        )
+      decode_llgr_entries(rest, [fam, ..acc])
+    }
+    _ -> list.reverse(acc)
   }
 }
 

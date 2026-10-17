@@ -63,6 +63,7 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 7752** | Distribution of BGP Link-State (BGP-LS: Node NLRIs, Link NLRIs & Attribute 29 TLVs) | Full |
 | **RFC 7938 / 7454** | BGP Route Hygiene & Security (Martian ASNs, RFC 6890 Bogons, Path Bounds & Prepending Limits) | Full |
 | **RFC 9319** | Autonomous System Provider Authorization (ASPA BGP Path Verification & Valley-Free Routing) | Full |
+| **RFC 8538** | BGP Long-Lived Graceful Restart (LLGR Capability 71, LLGR_STALE & NO_LLGR Communities) | Full |
 
 ---
 
@@ -266,6 +267,13 @@ slopbgpctl netmodel sim examples/slopnet_global.json
 
 # Run network resilience, high-availability & SLA latency audit
 slopbgpctl netmodel audit examples/slopnet_global.json
+
+# Run what-if failure blast-radius simulation (disaster recovery & link severance)
+slopbgpctl netmodel whatif examples/slopnet_global.json fail-node fra-core1
+slopbgpctl netmodel whatif examples/slopnet_global.json fail-link wan_fra_nyc
+
+# Inspect RFC 8538 Long-Lived Graceful Restart (LLGR) status
+slopbgpctl llgr
 
 # Inspect RFC 9319 ASPA verification & test AS paths
 slopbgpctl aspa
