@@ -8,10 +8,10 @@ import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
 import slopbgp/types.{
-  type DampedRoute, type FlowspecRule, type PeerStats, type Route, AsSequence,
-  AsSet, OriginEgp, OriginIgp, OriginIncomplete, RoaInvalid, RoaNotFound,
-  RoaValid, StateActive, StateConnect, StateEstablished, StateIdle,
-  StateOpenConfirm, StateOpenSent,
+  type DampedRoute, type FlowspecRule, type PeerConfig, type PeerStats,
+  type Route, AsSequence, AsSet, OriginEgp, OriginIgp, OriginIncomplete,
+  RoaInvalid, RoaNotFound, RoaValid, StateActive, StateConnect, StateEstablished,
+  StateIdle, StateOpenConfirm, StateOpenSent,
 }
 
 pub fn render_json_status(
@@ -52,6 +52,11 @@ pub fn render_json_peers(peers: List(PeerStats)) -> String {
         #("updates_sent", json.int(p.updates_sent)),
         #("keepalives_received", json.int(p.keepalives_received)),
         #("keepalives_sent", json.int(p.keepalives_sent)),
+        #("drained", json.bool(p.drained)),
+        #("last_shutdown_communication", case p.last_shutdown_communication {
+          Some(reason) -> json.string(reason)
+          None -> json.null()
+        }),
         #("last_error", case p.last_error {
           Some(e) -> json.string(e)
           None -> json.null()
@@ -137,6 +142,49 @@ pub fn render_json_damping(damped: List(DampedRoute)) -> String {
   |> json.to_string
 }
 
+pub fn render_json_routeserver(asn: Int, clients: List(PeerConfig)) -> String {
+  let client_objects =
+    list.map(clients, fn(c) {
+      json.object([
+        #("id", json.string(c.id)),
+        #("name", json.string(c.name)),
+        #("remote_as", json.int(c.remote_as)),
+        #("remote_ip", json.string(ip_to_string(c.remote_ip))),
+        #("route_server_client", json.bool(c.route_server_client)),
+      ])
+    })
+  json.object([
+    #("routeserver_asn", json.int(asn)),
+    #("rfc", json.string("RFC 7947 / RFC 7948")),
+    #("transparent_as_path", json.bool(True)),
+    #("transparent_next_hop", json.bool(True)),
+    #("clients", json.preprocessed_array(client_objects)),
+  ])
+  |> json.to_string
+}
+
+pub fn render_json_bmp(peers: List(PeerConfig)) -> String {
+  let feed_objects =
+    list.map(peers, fn(p) {
+      json.object([
+        #("peer_id", json.string(p.id)),
+        #("peer_asn", json.int(p.remote_as)),
+        #("status", json.string("active")),
+        #(
+          "monitored_messages",
+          json.string("route_monitoring, stats, peer_up, peer_down"),
+        ),
+      ])
+    })
+  json.object([
+    #("bmp_version", json.int(3)),
+    #("rfc", json.string("RFC 7854")),
+    #("monitoring_active", json.bool(True)),
+    #("feeds", json.preprocessed_array(feed_objects)),
+  ])
+  |> json.to_string
+}
+
 pub fn render_dashboard_html(
   asn: Int,
   router_id: String,
@@ -155,12 +203,28 @@ pub fn render_dashboard_html(
         StateOpenConfirm | StateOpenSent -> "badge-warning"
         _ -> "badge-danger"
       }
+      let drained_badge = case p.drained {
+        True ->
+          " <span class='badge badge-warning' style='margin-left:4px;'>DRAINED</span>"
+        False -> ""
+      }
+      let shutdown_note = case p.last_shutdown_communication {
+        Some(msg) ->
+          "<br><small style='color:#f85149'>Shut: \""
+          <> msg
+          <> "\" (RFC 9003)</small>"
+        None -> ""
+      }
       "<tr>"
       <> "<td><strong>"
       <> p.id
-      <> "</strong><br><small style='color:#8b949e'>"
+      <> "</strong>"
+      <> drained_badge
+      <> "<br><small style='color:#8b949e'>"
       <> p.name
-      <> "</small></td>"
+      <> "</small>"
+      <> shutdown_note
+      <> "</td>"
       <> "<td>AS"
       <> int.to_string(p.remote_as)
       <> "</td>"
@@ -518,7 +582,7 @@ pub fn render_dashboard_html(
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a>
   </footer>
 </body>
 </html>"

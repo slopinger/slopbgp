@@ -35,6 +35,16 @@ pub fn run_with_args(args: List(String)) -> Nil {
     | ["peers", ..]
     | ["routes", ..]
     | ["fib", ..]
+    | ["flap", ..]
+    | ["flowspec", ..]
+    | ["drain", ..]
+    | ["shutdown", ..]
+    | ["undrain", ..]
+    | ["reload", ..]
+    | ["bmp", ..]
+    | ["routeserver", ..]
+    | ["metrics", ..]
+    | ["policy", ..]
     | ["roa", ..] -> run_ctl(args)
     ["daemon", ..] | [] -> run_daemon()
     _ -> {

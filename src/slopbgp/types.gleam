@@ -170,6 +170,7 @@ pub type PeerConfig {
     dn42_region: Option(Int),
     import_filters: List(String),
     export_filters: List(String),
+    route_server_client: Bool,
   )
 }
 
@@ -187,6 +188,8 @@ pub type PeerStats {
     keepalives_received: Int,
     keepalives_sent: Int,
     last_error: Option(String),
+    last_shutdown_communication: Option(String),
+    drained: Bool,
   )
 }
 
@@ -203,6 +206,8 @@ pub type FlowspecComponent {
   FlowTcpFlags(op: Int, value: Int)
   FlowPacketLength(op: Int, value: Int)
   FlowDscp(op: Int, value: Int)
+  FlowNextHeader(op: Int, value: Int)
+  FlowLabel(op: Int, value: Int)
 }
 
 pub type FlowspecAction {
@@ -294,4 +299,39 @@ pub type PolicyChain {
     default_action: PolicyAction,
     rules: List(PolicyRule),
   )
+}
+
+// RFC 7854 BGP Monitoring Protocol (BMP)
+pub type BmpPeerHeader {
+  BmpPeerHeader(
+    peer_type: Int,
+    is_ipv6: Bool,
+    is_post_policy: Bool,
+    peer_distinguisher: BitArray,
+    peer_ip: IpAddress,
+    peer_as: Int,
+    peer_bgp_id: IpAddress,
+    timestamp_sec: Int,
+    timestamp_usec: Int,
+  )
+}
+
+pub type BmpStatCounter {
+  BmpStatCounter(stat_type: Int, value: Int)
+}
+
+pub type BmpMessage {
+  BmpMsgRouteMonitoring(peer: BmpPeerHeader, bgp_update: BitArray)
+  BmpMsgStatsReport(peer: BmpPeerHeader, counters: List(BmpStatCounter))
+  BmpMsgPeerDown(peer: BmpPeerHeader, reason_code: Int, notif: Option(BitArray))
+  BmpMsgPeerUp(
+    peer: BmpPeerHeader,
+    local_ip: IpAddress,
+    local_port: Int,
+    remote_port: Int,
+    sent_open: BitArray,
+    recv_open: BitArray,
+  )
+  BmpMsgInitiation(sys_name: String, sys_descr: String)
+  BmpMsgTermination(reason: Int, message: String)
 }

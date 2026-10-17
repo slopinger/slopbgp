@@ -139,31 +139,30 @@ pub fn parse_config_json(json_str: String) -> Result(DaemonConfig, String) {
               True -> Some(rp.bandwidth)
               False -> None
             }
-            Ok(
-              PeerConfig(
-                id: rp.id,
-                name: rp.name,
-                remote_as: rp.remote_as,
-                remote_ip: rip,
-                local_as: raw.asn,
-                local_ip: v4,
-                port: rp.port,
-                hold_time: rp.hold_time,
-                keepalive_time: rp.keepalive_time,
-                passive: False,
-                enable_ipv4: True,
-                enable_ipv6: True,
-                extended_next_hop: True,
-                add_path_rx: True,
-                add_path_tx: False,
-                dn42_latency: lat_opt,
-                dn42_bandwidth: bw_opt,
-                dn42_crypto: Some(34),
-                dn42_region: Some(41),
-                import_filters: [],
-                export_filters: [],
-              ),
-            )
+            Ok(PeerConfig(
+              id: rp.id,
+              name: rp.name,
+              remote_as: rp.remote_as,
+              remote_ip: rip,
+              local_as: raw.asn,
+              local_ip: v4,
+              port: rp.port,
+              hold_time: rp.hold_time,
+              keepalive_time: rp.keepalive_time,
+              passive: False,
+              enable_ipv4: True,
+              enable_ipv6: True,
+              extended_next_hop: True,
+              add_path_rx: True,
+              add_path_tx: False,
+              dn42_latency: lat_opt,
+              dn42_bandwidth: bw_opt,
+              dn42_crypto: Some(34),
+              dn42_region: Some(41),
+              import_filters: [],
+              export_filters: [],
+              route_server_client: False,
+            ))
           }),
         )
 

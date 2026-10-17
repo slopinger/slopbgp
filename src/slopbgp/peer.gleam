@@ -59,6 +59,8 @@ pub fn new_peer(config: PeerConfig) -> PeerHandle {
       keepalives_received: 0,
       keepalives_sent: 0,
       last_error: None,
+      last_shutdown_communication: None,
+      drained: False,
     )
   PeerHandle(
     config: config,

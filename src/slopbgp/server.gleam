@@ -25,6 +25,7 @@ import slopbgp/rib/rib.{
   type Rib, get_all_routes, insert_route, new_rib, prepare_outbound_route,
   withdraw_all_from_peer, withdraw_route,
 }
+import slopbgp/routeserver/routeserver
 import slopbgp/types.{
   type BgpMessage, type DampedRoute, type DampingConfig, type FlowspecRule,
   type PeerConfig, type PeerStats, type PolicyChain, type RoaEntry, type Route,
@@ -307,16 +308,27 @@ fn propagate_routes_to_peers(
                 let target_is_drained =
                   list.contains(acc.drained_peers, target_peer_id)
 
-                // Prepare outbound routes for this peer
+                // Prepare outbound routes for this peer (RFC 7947 Route Server or standard eBGP/iBGP)
                 let outbound_routes =
                   list.filter_map(routes_to_send, fn(r) {
-                    case
-                      prepare_outbound_route(
-                        r,
-                        target_peer.config,
-                        target_peer.config.local_ip,
-                      )
+                    let maybe_prepared = case
+                      target_peer.config.route_server_client
                     {
+                      True ->
+                        routeserver.prepare_routeserver_outbound_route(
+                          r,
+                          target_peer.config.remote_as,
+                          target_peer.config.local_as,
+                        )
+                      False ->
+                        prepare_outbound_route(
+                          r,
+                          target_peer.config,
+                          target_peer.config.local_ip,
+                        )
+                    }
+
+                    case maybe_prepared {
                       Some(prepared) -> {
                         // RFC 8326 Graceful Shutdown: attach community & drop local_pref if drained
                         case target_is_drained {
@@ -460,7 +472,10 @@ pub fn get_prometheus_metrics(state: ServerState) -> String {
 
 pub fn get_peer_stats_list(state: ServerState) -> List(PeerStats) {
   dict.values(state.peers)
-  |> list.map(fn(p) { p.stats })
+  |> list.map(fn(p) {
+    let is_drained = list.contains(state.drained_peers, p.config.id)
+    PeerStats(..p.stats, drained: is_drained)
+  })
 }
 
 pub fn get_all_active_routes(state: ServerState) -> List(Route) {
@@ -469,4 +484,56 @@ pub fn get_all_active_routes(state: ServerState) -> List(Route) {
 
 pub fn get_fib_routes(state: ServerState) -> List(FibEntry) {
   kernel.get_installed_entries(state.fib)
+}
+
+/// Dynamically remove a peer and flush all its advertised routes from Loc-RIB
+pub fn remove_peer(state: ServerState, peer_id: String) -> ServerState {
+  let upd_rib = withdraw_all_from_peer(state.rib, peer_id)
+  let updated_peers = dict.delete(state.peers, peer_id)
+  let log_entry =
+    "[peer] Removed peer " <> peer_id <> ", flushed routes from Loc-RIB"
+  ServerState(..state, rib: upd_rib, peers: updated_peers, event_log: [
+    log_entry,
+    ..state.event_log
+  ])
+}
+
+/// Dynamically reload daemon configuration without tearing down unaffected sessions
+pub fn reload_config(
+  state: ServerState,
+  new_config: DaemonConfig,
+) -> #(ServerState, List(String)) {
+  let existing_ids = dict.keys(state.peers)
+  let new_ids = list.map(new_config.peers, fn(p) { p.id })
+
+  // Find added and removed peers
+  let added_peers =
+    list.filter(new_config.peers, fn(p) { !list.contains(existing_ids, p.id) })
+  let removed_ids =
+    list.filter(existing_ids, fn(id) { !list.contains(new_ids, id) })
+
+  // Add new peers
+  let state_with_added =
+    list.fold(added_peers, state, fn(acc, p_cfg) { add_peer(acc, p_cfg) })
+
+  // Gracefully close and remove defunct peers
+  let state_with_removed =
+    list.fold(removed_ids, state_with_added, fn(acc, rem_id) {
+      remove_peer(acc, rem_id)
+    })
+
+  let events = [
+    "[reload] Configuration reloaded",
+    "[reload] Added " <> int.to_string(list.length(added_peers)) <> " new peers",
+    "[reload] Removed " <> int.to_string(list.length(removed_ids)) <> " peers",
+  ]
+
+  let updated_state =
+    ServerState(
+      ..state_with_removed,
+      config: new_config,
+      event_log: list.append(events, state_with_removed.event_log),
+    )
+
+  #(updated_state, events)
 }

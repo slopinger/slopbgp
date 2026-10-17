@@ -4,13 +4,17 @@ import gleam/int
 import gleam/list
 import gleam/option.{None}
 import gleam/string
-import slopbgp/ip.{decode_single_prefix, encode_prefix, prefix_to_string}
+import slopbgp/ip.{
+  bytes_to_ipv6, decode_single_prefix, encode_prefix, is_ipv6_prefix,
+  normalize_ipv6, pad_to_bytes, prefix_to_string,
+}
 import slopbgp/types.{
   type Afi, type ExtendedCommunity, type FlowspecAction, type FlowspecComponent,
-  type FlowspecRule, ExtCommunity, FlowActionDrop, FlowActionMarkDscp,
+  type FlowspecRule, AfiIpv6, ExtCommunity, FlowActionDrop, FlowActionMarkDscp,
   FlowActionRateLimit, FlowActionRedirect, FlowActionSample, FlowDscp,
   FlowDstPort, FlowDstPrefix, FlowIcmpCode, FlowIcmpType, FlowIpProtocol,
-  FlowPacketLength, FlowPort, FlowSrcPort, FlowSrcPrefix, FlowTcpFlags,
+  FlowLabel, FlowNextHeader, FlowPacketLength, FlowPort, FlowSrcPort,
+  FlowSrcPrefix, FlowTcpFlags, IpPrefix,
 }
 
 // RFC 5575 / RFC 8955 Flowspec Component Type Codes
@@ -38,6 +42,9 @@ pub const type_dscp = 11
 
 pub const type_fragment = 12
 
+// RFC 8956 IPv6 Flowspec Extension Component Codes
+pub const type_flow_label = 13
+
 // Flowspec Extended Community Sub-Types (Type 0x80)
 pub const ext_sub_traffic_rate = 0x06
 
@@ -51,15 +58,35 @@ pub const ext_sub_traffic_marking = 0x09
 pub fn encode_component(comp: FlowspecComponent) -> BitArray {
   case comp {
     FlowDstPrefix(pfx) -> {
-      let pfx_bin = encode_prefix(pfx, None)
-      <<type_dst_prefix:8, pfx_bin:bits>>
+      case is_ipv6_prefix(pfx) {
+        True -> {
+          let assert <<len:8, prefix_octets:bits>> = encode_prefix(pfx, None)
+          <<type_dst_prefix:8, len:8, 0:8, prefix_octets:bits>>
+        }
+        False -> {
+          let pfx_bin = encode_prefix(pfx, None)
+          <<type_dst_prefix:8, pfx_bin:bits>>
+        }
+      }
     }
     FlowSrcPrefix(pfx) -> {
-      let pfx_bin = encode_prefix(pfx, None)
-      <<type_src_prefix:8, pfx_bin:bits>>
+      case is_ipv6_prefix(pfx) {
+        True -> {
+          let assert <<len:8, prefix_octets:bits>> = encode_prefix(pfx, None)
+          <<type_src_prefix:8, len:8, 0:8, prefix_octets:bits>>
+        }
+        False -> {
+          let pfx_bin = encode_prefix(pfx, None)
+          <<type_src_prefix:8, pfx_bin:bits>>
+        }
+      }
     }
     FlowIpProtocol(op, val) -> {
       // numeric operator byte: end-of-list (0x80) | op (e.g. 0x01 == EQ) | length (0x00 for 1-byte)
+      let op_byte = int.bitwise_or(0x81, op)
+      <<type_ip_protocol:8, op_byte:8, val:8>>
+    }
+    FlowNextHeader(op, val) -> {
       let op_byte = int.bitwise_or(0x81, op)
       <<type_ip_protocol:8, op_byte:8, val:8>>
     }
@@ -94,6 +121,10 @@ pub fn encode_component(comp: FlowspecComponent) -> BitArray {
     FlowDscp(op, val) -> {
       let op_byte = int.bitwise_or(0x81, op)
       <<type_dscp:8, op_byte:8, val:8>>
+    }
+    FlowLabel(op, val) -> {
+      let op_byte = int.bitwise_or(0x81, op)
+      <<type_flow_label:8, op_byte:8, val:32>>
     }
   }
 }
@@ -133,29 +164,105 @@ fn decode_components_loop(
       case type_code {
         1 -> {
           // Destination Prefix
-          case decode_single_prefix(rest, afi) {
-            Ok(#(pfx, remaining)) ->
-              decode_components_loop(remaining, afi, [FlowDstPrefix(pfx), ..acc])
-            Error(err) -> Error("Flowspec decode dst prefix failed: " <> err)
+          case afi {
+            AfiIpv6 -> {
+              case rest {
+                <<len:8, _offset:8, rem_pfx:bits>> -> {
+                  let octets_needed = case len {
+                    0 -> 0
+                    _ -> { len + 7 } / 8
+                  }
+                  let bits_needed = octets_needed * 8
+                  case rem_pfx {
+                    <<pfx_raw:bits-size(bits_needed), rem:bits>> -> {
+                      let padded = pad_to_bytes(pfx_raw, 16)
+                      case bytes_to_ipv6(padded) {
+                        Ok(ip) -> {
+                          let pfx = IpPrefix(normalize_ipv6(ip, len), len)
+                          decode_components_loop(rem, afi, [
+                            FlowDstPrefix(pfx),
+                            ..acc
+                          ])
+                        }
+                        Error(err) ->
+                          Error("Flowspec IPv6 dst decode failed: " <> err)
+                      }
+                    }
+                    _ -> Error("Truncated Flowspec IPv6 dst prefix")
+                  }
+                }
+                _ -> Error("Truncated Flowspec IPv6 dst prefix header")
+              }
+            }
+            _ -> {
+              case decode_single_prefix(rest, afi) {
+                Ok(#(pfx, remaining)) ->
+                  decode_components_loop(remaining, afi, [
+                    FlowDstPrefix(pfx),
+                    ..acc
+                  ])
+                Error(err) ->
+                  Error("Flowspec decode dst prefix failed: " <> err)
+              }
+            }
           }
         }
         2 -> {
           // Source Prefix
-          case decode_single_prefix(rest, afi) {
-            Ok(#(pfx, remaining)) ->
-              decode_components_loop(remaining, afi, [FlowSrcPrefix(pfx), ..acc])
-            Error(err) -> Error("Flowspec decode src prefix failed: " <> err)
+          case afi {
+            AfiIpv6 -> {
+              case rest {
+                <<len:8, _offset:8, rem_pfx:bits>> -> {
+                  let octets_needed = case len {
+                    0 -> 0
+                    _ -> { len + 7 } / 8
+                  }
+                  let bits_needed = octets_needed * 8
+                  case rem_pfx {
+                    <<pfx_raw:bits-size(bits_needed), rem:bits>> -> {
+                      let padded = pad_to_bytes(pfx_raw, 16)
+                      case bytes_to_ipv6(padded) {
+                        Ok(ip) -> {
+                          let pfx = IpPrefix(normalize_ipv6(ip, len), len)
+                          decode_components_loop(rem, afi, [
+                            FlowSrcPrefix(pfx),
+                            ..acc
+                          ])
+                        }
+                        Error(err) ->
+                          Error("Flowspec IPv6 src decode failed: " <> err)
+                      }
+                    }
+                    _ -> Error("Truncated Flowspec IPv6 src prefix")
+                  }
+                }
+                _ -> Error("Truncated Flowspec IPv6 src prefix header")
+              }
+            }
+            _ -> {
+              case decode_single_prefix(rest, afi) {
+                Ok(#(pfx, remaining)) ->
+                  decode_components_loop(remaining, afi, [
+                    FlowSrcPrefix(pfx),
+                    ..acc
+                  ])
+                Error(err) ->
+                  Error("Flowspec decode src prefix failed: " <> err)
+              }
+            }
           }
         }
         3 -> {
-          // IP Protocol
+          // IP Protocol (IPv4) or Next Header (IPv6)
           case rest {
-            <<op:8, proto:8, remaining:bits>> ->
-              decode_components_loop(remaining, afi, [
-                FlowIpProtocol(op, proto),
-                ..acc
-              ])
-            _ -> Error("Truncated Flowspec IP protocol component")
+            <<op:8, proto:8, remaining:bits>> -> {
+              let comp = case afi {
+                AfiIpv6 -> FlowNextHeader(op, proto)
+                _ -> FlowIpProtocol(op, proto)
+              }
+              decode_components_loop(remaining, afi, [comp, ..acc])
+            }
+            _ -> Error("Truncated Flowspec protocol component")
           }
         }
         4 -> {
@@ -238,6 +345,17 @@ fn decode_components_loop(
             <<op:8, dscp:8, remaining:bits>> ->
               decode_components_loop(remaining, afi, [FlowDscp(op, dscp), ..acc])
             _ -> Error("Truncated Flowspec DSCP component")
+          }
+        }
+        13 -> {
+          // Flow Label (RFC 8956)
+          case rest {
+            <<op:8, label:32, remaining:bits>> ->
+              decode_components_loop(remaining, afi, [
+                FlowLabel(op, label),
+                ..acc
+              ])
+            _ -> Error("Truncated Flowspec flow label component")
           }
         }
         _ ->
@@ -325,6 +443,16 @@ pub fn format_rule(rule: FlowspecRule) -> String {
           }
           "proto " <> name
         }
+        FlowNextHeader(_op, nh) -> {
+          let name = case nh {
+            6 -> "tcp"
+            17 -> "udp"
+            58 -> "icmpv6"
+            _ -> int.to_string(nh)
+          }
+          "nexthdr " <> name
+        }
+        FlowLabel(_op, fl) -> "flowlabel " <> int.to_string(fl)
         FlowPort(_op, p) -> "port " <> int.to_string(p)
         FlowDstPort(_op, p) -> "dport " <> int.to_string(p)
         FlowSrcPort(_op, p) -> "sport " <> int.to_string(p)
@@ -355,15 +483,37 @@ pub fn format_rule(rule: FlowspecRule) -> String {
 
 /// Generate Linux nftables rule snippet from a Flowspec rule
 pub fn to_nftables_rule(rule: FlowspecRule) -> String {
+  let is_v6 =
+    list.any(rule.components, fn(c) {
+      case c {
+        FlowDstPrefix(pfx) | FlowSrcPrefix(pfx) -> is_ipv6_prefix(pfx)
+        FlowNextHeader(_, _) | FlowLabel(_, _) -> True
+        _ -> False
+      }
+    })
+
   let parts =
     list.filter_map(rule.components, fn(c) {
       case c {
-        FlowDstPrefix(pfx) -> Ok("ip daddr " <> prefix_to_string(pfx))
-        FlowSrcPrefix(pfx) -> Ok("ip saddr " <> prefix_to_string(pfx))
+        FlowDstPrefix(pfx) ->
+          case is_ipv6_prefix(pfx) {
+            True -> Ok("ip6 daddr " <> prefix_to_string(pfx))
+            False -> Ok("ip daddr " <> prefix_to_string(pfx))
+          }
+        FlowSrcPrefix(pfx) ->
+          case is_ipv6_prefix(pfx) {
+            True -> Ok("ip6 saddr " <> prefix_to_string(pfx))
+            False -> Ok("ip saddr " <> prefix_to_string(pfx))
+          }
         FlowIpProtocol(_op, 6) -> Ok("ip protocol tcp")
         FlowIpProtocol(_op, 17) -> Ok("ip protocol udp")
         FlowIpProtocol(_op, 1) -> Ok("ip protocol icmp")
         FlowIpProtocol(_op, other) -> Ok("ip protocol " <> int.to_string(other))
+        FlowNextHeader(_op, 6) -> Ok("ip6 nexthdr tcp")
+        FlowNextHeader(_op, 17) -> Ok("ip6 nexthdr udp")
+        FlowNextHeader(_op, 58) -> Ok("ip6 nexthdr icmpv6")
+        FlowNextHeader(_op, other) -> Ok("ip6 nexthdr " <> int.to_string(other))
+        FlowLabel(_op, fl) -> Ok("ip6 flowlabel " <> int.to_string(fl))
         FlowDstPort(_op, p) -> Ok("th dport " <> int.to_string(p))
         FlowSrcPort(_op, p) -> Ok("th sport " <> int.to_string(p))
         _ -> Error(Nil)
@@ -380,5 +530,10 @@ pub fn to_nftables_rule(rule: FlowspecRule) -> String {
     _ -> "drop"
   }
 
-  "nft add rule inet filter input " <> parts <> " " <> action
+  let table_family = case is_v6 {
+    True -> "ip6"
+    False -> "inet"
+  }
+
+  "nft add rule " <> table_family <> " filter input " <> parts <> " " <> action
 }

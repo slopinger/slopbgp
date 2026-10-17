@@ -63,6 +63,7 @@ pub fn run_simulation() -> Result(Nil, String) {
       dn42_region: Some(41),
       import_filters: [],
       export_filters: [],
+      route_server_client: False,
     )
 
   let srv = server.add_peer(new_server(cfg), peer_cfg)

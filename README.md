@@ -45,7 +45,11 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 7606** | Revised Error Handling for BGP UPDATE Messages (treat-as-withdraw) | Full |
 | **RFC 2439** | BGP Route Flap Damping (exponential decay, suppression & reuse thresholds) | Full |
 | **RFC 8326** | Graceful BGP Session Shutdown (well-known community `65535:0` / `GRACEFUL_SHUTDOWN`) | Full |
+| **RFC 9003** | Extended BGP Administrative Shutdown Communication (UTF-8 reason in NOTIFICATION Cease) | Full |
 | **RFC 5575 / 8955** | Dissemination of Flow Specification Rules (BGP Flowspec IPv4 & nftables compilation) | Full |
+| **RFC 8956** | Dissemination of Flow Specification Rules for IPv6 (Next Header, Flow Label, offset encoding) | Full |
+| **RFC 7854** | BGP Monitoring Protocol (BMP v3: Route Monitoring, Stats, Peer Up/Down, Initiation TLVs) | Full |
+| **RFC 7947 / 7948** | Internet Exchange Point (IXP) Route Server (Transparent AS_PATH, NEXT_HOP & Community Matrix) | Full |
 
 ---
 
@@ -136,6 +140,8 @@ Perform hitless, zero-packet-loss maintenance on routers and peering links:
   * `GET /api/fib`: JSON kernel forwarding table entries
   * `GET /api/flowspec`: JSON active Flowspec DDoS rules
   * `GET /api/damping`: JSON route flap damping history and suppressed paths
+  * `GET /api/routeserver`: JSON RFC 7947 / RFC 7948 Route Server client matrix
+  * `GET /api/bmp`: JSON RFC 7854 BGP Monitoring Protocol station feeds
   * `GET /metrics`: Prometheus metric exposition
 
 ---
@@ -161,13 +167,24 @@ slopbgpctl fib
 # Inspect Route Flap Damping suppression table
 slopbgpctl flap
 
-# Inspect and manage active BGP Flowspec DDoS mitigation rules
+# Inspect active BGP Flowspec DDoS mitigation rules (IPv4 & IPv6 RFC 8956)
 slopbgpctl flowspec
-slopbgpctl flowspec add 172.22.64.200/32 17 --rate 0
 
-# Gracefully drain / undrain a BGP peer session (RFC 8326)
-slopbgpctl drain 172.22.64.130
+# Gracefully drain / undrain a BGP peer session (RFC 8326 + RFC 9003)
+slopbgpctl drain 172.22.64.130 "Link maintenance 08:00 UTC"
 slopbgpctl undrain 172.22.64.130
+
+# Administratively shut down session with RFC 9003 communication
+slopbgpctl shutdown 172.22.64.130 "Decommissioning upstream peer"
+
+# Dynamic hot-reload of daemon configuration without session drops
+slopbgpctl reload
+
+# Inspect RFC 7854 BMP monitoring feeds
+slopbgpctl bmp
+
+# Inspect RFC 7947/7948 IXP Route Server status & clients
+slopbgpctl routeserver
 
 # Inspect configured routing policies
 slopbgpctl policy

@@ -21,6 +21,17 @@ pub fn ipv4_to_string(ip: IpAddress) -> String {
   }
 }
 
+pub fn is_ipv6(ip: IpAddress) -> Bool {
+  case ip {
+    Ipv6(_, _, _, _, _, _, _, _) -> True
+    _ -> False
+  }
+}
+
+pub fn is_ipv6_prefix(prefix: IpPrefix) -> Bool {
+  is_ipv6(prefix.address)
+}
+
 pub fn ipv6_to_string(ip: IpAddress) -> String {
   case ip {
     Ipv6(a, b, c, d, e, f, g, h) -> {
@@ -489,7 +500,7 @@ fn split_bytes(bytes: BitArray, n: Int) -> Result(#(BitArray, BitArray), Nil) {
   }
 }
 
-fn pad_to_bytes(bytes: BitArray, target_len: Int) -> BitArray {
+pub fn pad_to_bytes(bytes: BitArray, target_len: Int) -> BitArray {
   let curr_len = bit_size_in_bytes(bytes)
   case curr_len >= target_len {
     True -> bytes

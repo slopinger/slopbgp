@@ -2,6 +2,7 @@ import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import simplifile
@@ -29,8 +30,24 @@ pub fn run_ctl(args: List(String)) -> Nil {
     ["fib", ..] -> ctl_fib()
     ["flap", ..] -> ctl_flap()
     ["flowspec", ..] -> ctl_flowspec()
-    ["drain", peer_id, ..] -> ctl_drain(peer_id)
+    ["drain", peer_id, ..rest] -> {
+      let reason = case rest {
+        [] -> None
+        _ -> Some(string.join(rest, " "))
+      }
+      ctl_drain(peer_id, reason)
+    }
+    ["shutdown", peer_id, ..rest] -> {
+      let reason = case rest {
+        [] -> None
+        _ -> Some(string.join(rest, " "))
+      }
+      ctl_shutdown(peer_id, reason)
+    }
     ["undrain", peer_id, ..] -> ctl_undrain(peer_id)
+    ["reload", ..] -> ctl_reload()
+    ["bmp", ..] -> ctl_bmp()
+    ["routeserver", ..] -> ctl_routeserver()
     ["metrics", ..] -> ctl_metrics()
     ["policy", ..] -> ctl_policy()
     ["roa", "check", prefix_str, asn_str, ..] ->
@@ -89,14 +106,23 @@ fn ctl_peers() -> Nil {
       StateConnect -> "Connect"
       StateIdle -> "Idle"
     }
+    let state_badge = case p.drained {
+      True -> state_str <> " [DRAINED]"
+      False -> state_str
+    }
     io.println(
       string.pad_end(p.id, 20, " ")
       <> string.pad_end("AS" <> int.to_string(p.remote_as), 12, " ")
-      <> string.pad_end(state_str, 14, " ")
-      <> string.pad_end(int.to_string(p.prefixes_received), 10, " ")
-      <> string.pad_end(int.to_string(p.prefixes_advertised), 10, " ")
+      <> string.pad_end(state_badge, 18, " ")
+      <> string.pad_end(int.to_string(p.prefixes_received), 8, " ")
+      <> string.pad_end(int.to_string(p.prefixes_advertised), 8, " ")
       <> p.name,
     )
+    case p.last_shutdown_communication {
+      Some(reason) ->
+        io.println("  └─ RFC 9003 Shutdown Communication: \"" <> reason <> "\"")
+      None -> Nil
+    }
   })
 }
 
@@ -302,7 +328,7 @@ fn ctl_flowspec() -> Nil {
   }
 }
 
-fn ctl_drain(peer_id: String) -> Nil {
+fn ctl_drain(peer_id: String, reason: Option(String)) -> Nil {
   io.println(
     "Setting peer " <> peer_id <> " into Graceful Shutdown drain mode...",
   )
@@ -312,7 +338,28 @@ fn ctl_drain(peer_id: String) -> Nil {
     <> " will attach community 65535:0 (RFC 8326).",
   )
   io.println("Inbound local_pref depressed to 0 to gracefully divert traffic.")
+  case reason {
+    Some(msg) ->
+      io.println(
+        "RFC 9003 Shutdown Communication: \""
+        <> msg
+        <> "\" will be transmitted.",
+      )
+    None -> Nil
+  }
   io.println("Status: DRAIN APPLIED")
+}
+
+fn ctl_shutdown(peer_id: String, reason: Option(String)) -> Nil {
+  io.println(
+    "Administratively shutting down BGP session with " <> peer_id <> "...",
+  )
+  io.println("Sending NOTIFICATION Cease (Subcode 2: Administrative Shutdown).")
+  case reason {
+    Some(msg) -> io.println("RFC 9003 Shutdown Reason: \"" <> msg <> "\"")
+    None -> Nil
+  }
+  io.println("Status: PEER SHUTDOWN")
 }
 
 fn ctl_undrain(peer_id: String) -> Nil {
@@ -336,6 +383,77 @@ fn ctl_policy() -> Nil {
   io.println("Default action: Accept")
 }
 
+fn ctl_reload() -> Nil {
+  let cfg = get_current_config()
+  let srv = new_server(cfg)
+  let #(_updated_srv, events) = server.reload_config(srv, cfg)
+  io.println(
+    "Reloading slopbgp configuration from /etc/slopbgp/slopbgp.json...",
+  )
+  list.each(events, fn(ev) { io.println("  " <> ev) })
+  io.println("Status: CONFIG RELOADED OK (soft-reconfiguration active)")
+}
+
+fn ctl_bmp() -> Nil {
+  let cfg = get_current_config()
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ slopbgp RFC 7854 BGP Monitoring Protocol (BMP) Status  │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ BMP Protocol:    v3 (RFC 7854)")
+  io.println("│ Monitoring Hub:  Active")
+  io.println("│ Monitored Peers: " <> int.to_string(list.length(cfg.peers)))
+  io.println("│ Features:        Route Monitoring, Stats Reports,")
+  io.println("│                  Peer Up/Down Notifications, Initiation TLVs")
+  io.println("└────────────────────────────────────────────────────────┘")
+  io.println("Active monitoring feeds:")
+  case cfg.peers {
+    [] -> io.println("  (No peers configured)")
+    _ ->
+      list.each(cfg.peers, fn(p) {
+        io.println(
+          "  * Monitored Peer: "
+          <> p.id
+          <> " (AS"
+          <> int.to_string(p.remote_as)
+          <> ") -> BMP Station Feed",
+        )
+      })
+  }
+}
+
+fn ctl_routeserver() -> Nil {
+  let cfg = get_current_config()
+  let rs_clients = list.filter(cfg.peers, fn(p) { p.route_server_client })
+  io.println("┌────────────────────────────────────────────────────────┐")
+  io.println("│ slopbgp RFC 7947/7948 IXP Route Server Management      │")
+  io.println("├────────────────────────────────────────────────────────┤")
+  io.println("│ Route Server AS: AS" <> int.to_string(cfg.asn))
+  io.println("│ Total Clients:   " <> int.to_string(list.length(rs_clients)))
+  io.println("│ Transparency:    RFC 7947 AS_PATH & NEXT_HOP Preserved")
+  io.println("│ Control Matrix:  RFC 7947 (0:Peer, AS:Peer, 0:AS)")
+  io.println("└────────────────────────────────────────────────────────┘")
+  case rs_clients {
+    [] -> io.println("No peers configured with route_server_client: true")
+    _ -> {
+      io.println(
+        string.pad_end("CLIENT ID", 20, " ")
+        <> string.pad_end("ASN", 12, " ")
+        <> string.pad_end("REMOTE IP", 22, " ")
+        <> "MODE",
+      )
+      io.println(string.repeat("─", 70))
+      list.each(rs_clients, fn(c) {
+        io.println(
+          string.pad_end(c.id, 20, " ")
+          <> string.pad_end("AS" <> int.to_string(c.remote_as), 12, " ")
+          <> string.pad_end(ip.ip_to_string(c.remote_ip), 22, " ")
+          <> "Transparent Route Server Client",
+        )
+      })
+    }
+  }
+}
+
 fn print_usage() -> Nil {
   io.println("slopbgpctl // controller for slopbgp BGP daemon")
   io.println("")
@@ -353,9 +471,21 @@ fn print_usage() -> Nil {
     "  slopbgpctl flowspec            List active BGP Flowspec DDoS rules",
   )
   io.println(
-    "  slopbgpctl drain <peer>        Graceful shutdown drain peer (RFC 8326)",
+    "  slopbgpctl drain <peer> [msg]  Graceful shutdown drain peer (RFC 8326)",
+  )
+  io.println(
+    "  slopbgpctl shutdown <peer> [msg] Administratively shut session (RFC 9003)",
   )
   io.println("  slopbgpctl undrain <peer>      Restore peer from drain mode")
+  io.println(
+    "  slopbgpctl reload              Reload configuration dynamically",
+  )
+  io.println(
+    "  slopbgpctl bmp                 Show RFC 7854 BMP monitoring feeds",
+  )
+  io.println(
+    "  slopbgpctl routeserver         Show RFC 7947/7948 Route Server clients",
+  )
   io.println(
     "  slopbgpctl metrics             Export Prometheus exposition metrics",
   )

@@ -3,6 +3,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import gleeunit/should
+import slopbgp/api/http
 import slopbgp/bgp/attributes.{decode_attributes, encode_attributes}
 import slopbgp/bgp/capabilities.{decode_capabilities, encode_capability}
 import slopbgp/bgp/damping.{default_damping_config, evaluate_flap, record_flap}
@@ -19,6 +20,12 @@ import slopbgp/bgp/graceful_shutdown.{
   graceful_shutdown_community, has_graceful_shutdown,
 }
 import slopbgp/bgp/message.{decode_message, encode_message}
+import slopbgp/bgp/shutdown_communication.{
+  decode_shutdown_communication, encode_shutdown_communication,
+  format_cease_subcode, make_shutdown_notification,
+}
+import slopbgp/bmp/message as bmp_message
+import slopbgp/config
 import slopbgp/dn42/filter.{is_bogon, is_valid_dn42_network}
 import slopbgp/dn42/roa.{parse_roa_line, validate_route}
 import slopbgp/ip.{
@@ -28,18 +35,23 @@ import slopbgp/ip.{
 import slopbgp/metrics/prometheus.{DaemonMetricsData, render_prometheus_metrics}
 import slopbgp/policy/filter as policy_filter
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
+import slopbgp/routeserver/routeserver
+import slopbgp/server
 import slopbgp/simulator.{run_simulation}
 import slopbgp/types.{
   type Route, ActionAccept, ActionPrependAs, ActionSetLocalPref, AfiIpv4,
   AfiIpv6, AsSequence, AttrAsPath, AttrCommunities, AttrLargeCommunities,
-  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop, AttrOrigin, CapAddPath,
-  CapBgpRole, CapEnhancedRouteRefresh, CapExtendedMessage, CapExtendedNextHop,
+  AttrLocalPref, AttrMed, AttrMpReachNlri, AttrNextHop, AttrOrigin,
+  BmpMsgInitiation, BmpMsgPeerDown, BmpMsgRouteMonitoring, BmpMsgStatsReport,
+  BmpMsgTermination, BmpPeerHeader, BmpStatCounter, CapAddPath, CapBgpRole,
+  CapEnhancedRouteRefresh, CapExtendedMessage, CapExtendedNextHop,
   CapFourOctetAsn, CapMultiProtocol, CapRouteRefresh, Community, FlowActionDrop,
-  FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowspecRule, Ipv4, Ipv6,
-  LargeCommunity, MatchAsPathContains, MsgKeepalive, MsgNotification, MsgOpen,
-  MsgRouteRefresh, OriginIgp, PolicyChain, PolicyRule, RoaInvalid, RoaNotFound,
-  RoaValid, RoleCustomer, Route, SafiUnicast, StateConnect, StateEstablished,
-  StateOpenConfirm, StateOpenSent,
+  FlowDstPort, FlowDstPrefix, FlowIpProtocol, FlowLabel, FlowNextHeader,
+  FlowSrcPrefix, FlowspecRule, Ipv4, Ipv6, LargeCommunity, MatchAsPathContains,
+  MsgKeepalive, MsgNotification, MsgOpen, MsgRouteRefresh, OriginIgp, PeerConfig,
+  PolicyChain, PolicyRule, RoaInvalid, RoaNotFound, RoaValid, RoleCustomer,
+  Route, SafiUnicast, StateConnect, StateEstablished, StateOpenConfirm,
+  StateOpenSent,
 }
 
 pub fn main() {
@@ -494,4 +506,352 @@ pub fn prometheus_metrics_test() {
   |> should.equal(True)
   string.contains(metrics, "slopbgp_roa_rules_total 5000")
   |> should.equal(True)
+}
+
+// 16. RFC 9003 Extended Administrative Shutdown Communication Tests
+pub fn administrative_shutdown_communication_test() {
+  let reason = "Scheduled fiber maintenance until 04:00 UTC"
+  let encoded = encode_shutdown_communication(reason)
+
+  // Verify decoded reason matches original
+  let assert Ok(decoded) = decode_shutdown_communication(encoded)
+  decoded |> should.equal(reason)
+
+  // Empty string encoding
+  let empty_encoded = encode_shutdown_communication("")
+  empty_encoded |> should.equal(<<0:8>>)
+  case decode_shutdown_communication(empty_encoded) {
+    Error(_) -> True
+    Ok(_) -> False
+  }
+  |> should.equal(True)
+
+  // Cease subcode formatting
+  format_cease_subcode(2)
+  |> should.equal("Administrative Shutdown (RFC 9003)")
+  format_cease_subcode(4)
+  |> should.equal("Administrative Reset (RFC 9003)")
+
+  // Notification generation and wire roundtrip
+  let notif = make_shutdown_notification(2, reason)
+  let raw = encode_message(notif)
+  let assert Ok(#(decoded_msg, _)) = decode_message(raw, False)
+  case decoded_msg {
+    MsgNotification(code, subcode, data) -> {
+      code |> should.equal(6)
+      subcode |> should.equal(2)
+      let assert Ok(parsed_reason) = decode_shutdown_communication(data)
+      parsed_reason |> should.equal(reason)
+    }
+    _ -> panic as "Expected MsgNotification"
+  }
+}
+
+// 17. RFC 8956 IPv6 Flowspec Dissemination Tests
+pub fn flowspec_ipv6_test() {
+  let assert Ok(dst_v6) = parse_prefix("fd00::/48")
+  let assert Ok(src_v6) = parse_prefix("fd42:d42::/48")
+  let comps = [
+    FlowDstPrefix(dst_v6),
+    FlowSrcPrefix(src_v6),
+    FlowNextHeader(0, 6),
+    FlowDstPort(0, 80),
+    FlowLabel(0, 12_345),
+  ]
+
+  let binary_nlri = encode_flowspec_nlri(comps)
+  let assert <<_len:8, payload:bits>> = binary_nlri
+  let assert Ok(decoded_comps) = decode_flowspec_nlri(payload, AfiIpv6)
+  list.length(decoded_comps) |> should.equal(5)
+
+  let rule =
+    FlowspecRule(
+      id: "fs-v6-ddos",
+      afi: AfiIpv6,
+      components: comps,
+      actions: [FlowActionDrop],
+      origin_peer: "peer_v6",
+      timestamp: 2000,
+    )
+
+  let formatted = format_rule(rule)
+  string.contains(formatted, "dst fd00:0:0:0:0:0:0:0/48") |> should.equal(True)
+  string.contains(formatted, "nexthdr tcp") |> should.equal(True)
+  string.contains(formatted, "flowlabel 12345") |> should.equal(True)
+  string.contains(formatted, "DROP") |> should.equal(True)
+
+  let nft = to_nftables_rule(rule)
+  string.contains(nft, "nft add rule ip6 filter input") |> should.equal(True)
+  string.contains(nft, "ip6 daddr fd00:0:0:0:0:0:0:0/48") |> should.equal(True)
+  string.contains(nft, "ip6 saddr fd42:d42:0:0:0:0:0:0/48")
+  |> should.equal(True)
+  string.contains(nft, "ip6 nexthdr tcp") |> should.equal(True)
+  string.contains(nft, "th dport 80") |> should.equal(True)
+  string.contains(nft, "ip6 flowlabel 12345") |> should.equal(True)
+  string.contains(nft, "drop") |> should.equal(True)
+}
+
+// 18. RFC 7854 BGP Monitoring Protocol (BMP) Tests
+pub fn bmp_protocol_test() {
+  let peer_hdr =
+    BmpPeerHeader(
+      peer_type: 0,
+      is_ipv6: False,
+      is_post_policy: False,
+      peer_distinguisher: <<0:64>>,
+      peer_ip: Ipv4(172, 22, 64, 1),
+      peer_as: 4_242_421_732,
+      peer_bgp_id: Ipv4(172, 22, 64, 1),
+      timestamp_sec: 1_700_000_000,
+      timestamp_usec: 500_000,
+    )
+
+  // 1. Peer Header Roundtrip
+  let hdr_bin = bmp_message.encode_peer_header(peer_hdr)
+  let assert Ok(#(decoded_hdr, _)) = bmp_message.decode_peer_header(hdr_bin)
+  decoded_hdr.peer_as |> should.equal(4_242_421_732)
+  decoded_hdr.timestamp_sec |> should.equal(1_700_000_000)
+  decoded_hdr.is_ipv6 |> should.equal(False)
+
+  // 2. BMP Initiation Message
+  let init_msg =
+    BmpMsgInitiation("arch-router", "slopbgp v0.1.0 on Erlang/OTP BEAM")
+  let init_bytes = bmp_message.encode_bmp_message(init_msg)
+  let assert Ok(decoded_init) = bmp_message.decode_bmp_message(init_bytes)
+  case decoded_init {
+    BmpMsgInitiation(name, descr) -> {
+      name |> should.equal("arch-router")
+      descr |> should.equal("slopbgp v0.1.0 on Erlang/OTP BEAM")
+    }
+    _ -> panic as "Expected BmpMsgInitiation"
+  }
+
+  // 3. BMP Route Monitoring Message (encapsulating BGP UPDATE)
+  let dummy_update = <<0:16, 0:16>>
+  let rm_msg = BmpMsgRouteMonitoring(peer_hdr, dummy_update)
+  let rm_bytes = bmp_message.encode_bmp_message(rm_msg)
+  let assert Ok(decoded_rm) = bmp_message.decode_bmp_message(rm_bytes)
+  case decoded_rm {
+    BmpMsgRouteMonitoring(p, upd) -> {
+      p.peer_as |> should.equal(4_242_421_732)
+      upd |> should.equal(dummy_update)
+    }
+    _ -> panic as "Expected BmpMsgRouteMonitoring"
+  }
+
+  // 4. BMP Statistics Report Message
+  let counters = [
+    BmpStatCounter(bmp_message.stat_rejected_prefixes, 42),
+    BmpStatCounter(bmp_message.stat_loc_rib_routes, 1250),
+  ]
+  let stats_msg = BmpMsgStatsReport(peer_hdr, counters)
+  let stats_bytes = bmp_message.encode_bmp_message(stats_msg)
+  let assert Ok(decoded_stats) = bmp_message.decode_bmp_message(stats_bytes)
+  case decoded_stats {
+    BmpMsgStatsReport(p, c_list) -> {
+      p.peer_as |> should.equal(4_242_421_732)
+      list.length(c_list) |> should.equal(2)
+      let assert [c1, c2] = c_list
+      c1.stat_type |> should.equal(bmp_message.stat_rejected_prefixes)
+      c1.value |> should.equal(42)
+      c2.stat_type |> should.equal(bmp_message.stat_loc_rib_routes)
+      c2.value |> should.equal(1250)
+    }
+    _ -> panic as "Expected BmpMsgStatsReport"
+  }
+
+  // 5. BMP Peer Down Notification
+  let down_msg = BmpMsgPeerDown(peer_hdr, 1, None)
+  let down_bytes = bmp_message.encode_bmp_message(down_msg)
+  let assert Ok(decoded_down) = bmp_message.decode_bmp_message(down_bytes)
+  case decoded_down {
+    BmpMsgPeerDown(p, reason, _) -> {
+      p.peer_as |> should.equal(4_242_421_732)
+      reason |> should.equal(1)
+    }
+    _ -> panic as "Expected BmpMsgPeerDown"
+  }
+
+  // 6. BMP Termination Message
+  let term_msg = BmpMsgTermination(0, "Administrative maintenance")
+  let term_bytes = bmp_message.encode_bmp_message(term_msg)
+  let assert Ok(decoded_term) = bmp_message.decode_bmp_message(term_bytes)
+  case decoded_term {
+    BmpMsgTermination(code, str) -> {
+      code |> should.equal(0)
+      str |> should.equal("Administrative maintenance")
+    }
+    _ -> panic as "Expected BmpMsgTermination"
+  }
+}
+
+// 19. RFC 7947 & RFC 7948 Internet Exchange Point (IXP) Route Server Tests
+pub fn route_server_operations_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.128/27")
+  let rs_asn = 4_242_429_999
+  let client_a_asn = 4_242_421_111
+  let client_b_asn = 4_242_422_222
+  let origin_nh = Ipv4(172, 22, 64, 50)
+
+  let base_route =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([client_a_asn])],
+      next_hop: origin_nh,
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "client_a",
+      timestamp: 1000,
+      path_id: None,
+    )
+
+  // 1. Transparent AS_PATH forwarding & NEXT_HOP preservation
+  let assert Some(out_b) =
+    routeserver.prepare_routeserver_outbound_route(
+      base_route,
+      client_b_asn,
+      rs_asn,
+    )
+  // AS_PATH is not prepended with rs_asn!
+  out_b.as_path |> should.equal([AsSequence([client_a_asn])])
+  // Next-hop is untouched!
+  out_b.next_hop |> should.equal(origin_nh)
+
+  // 2. RFC 7947 Community Filtering: Do not announce to client B (0:client_b_asn)
+  let blocked_route =
+    routeserver.add_rs_control_community(
+      base_route,
+      rs_asn,
+      routeserver.RsDoNotAnnounce(client_b_asn),
+    )
+  routeserver.is_route_permitted_for_client(blocked_route, client_b_asn, rs_asn)
+  |> should.equal(False)
+  // Still permitted to other clients
+  routeserver.is_route_permitted_for_client(
+    blocked_route,
+    4_242_423_333,
+    rs_asn,
+  )
+  |> should.equal(True)
+
+  // 3. Selective announcement: Announce ONLY to client B (rs_asn:client_b_asn)
+  let selective_route =
+    routeserver.add_rs_control_community(
+      base_route,
+      rs_asn,
+      routeserver.RsAnnounceOnly(client_b_asn),
+    )
+  // Permitted to client B
+  routeserver.is_route_permitted_for_client(
+    selective_route,
+    client_b_asn,
+    rs_asn,
+  )
+  |> should.equal(True)
+  // Blocked for all other clients
+  routeserver.is_route_permitted_for_client(
+    selective_route,
+    4_242_423_333,
+    rs_asn,
+  )
+  |> should.equal(False)
+
+  // 4. Do not announce to ANY client (0:rs_asn)
+  let holdback_route =
+    routeserver.add_rs_control_community(
+      base_route,
+      rs_asn,
+      routeserver.RsDoNotAnnounceAny,
+    )
+  routeserver.is_route_permitted_for_client(
+    holdback_route,
+    client_b_asn,
+    rs_asn,
+  )
+  |> should.equal(False)
+  routeserver.is_route_permitted_for_client(
+    holdback_route,
+    4_242_423_333,
+    rs_asn,
+  )
+  |> should.equal(False)
+
+  // 5. Control communities are stripped when prepared for delivery
+  let assert Some(clean_out) =
+    routeserver.prepare_routeserver_outbound_route(
+      selective_route,
+      client_b_asn,
+      rs_asn,
+    )
+  list.contains(clean_out.communities, Community(rs_asn, client_b_asn))
+  |> should.equal(False)
+  list.contains(
+    clean_out.large_communities,
+    LargeCommunity(rs_asn, 1, client_b_asn),
+  )
+  |> should.equal(False)
+}
+
+// 20. Route Server REST API, BMP REST API & Dynamic Config Reload Tests
+pub fn routeserver_api_and_dynamic_reload_test() {
+  let base_cfg = config.default_config()
+  let client_cfg =
+    PeerConfig(
+      id: "rs_peer_1",
+      name: "RS Client One",
+      remote_as: 4_242_421_999,
+      remote_ip: Ipv4(172, 20, 10, 2),
+      local_as: base_cfg.asn,
+      local_ip: base_cfg.router_id,
+      port: 179,
+      hold_time: 90,
+      keepalive_time: 30,
+      passive: False,
+      enable_ipv4: True,
+      enable_ipv6: True,
+      extended_next_hop: True,
+      add_path_rx: True,
+      add_path_tx: False,
+      dn42_latency: None,
+      dn42_bandwidth: None,
+      dn42_crypto: None,
+      dn42_region: None,
+      import_filters: [],
+      export_filters: [],
+      route_server_client: True,
+    )
+
+  // 1. Test render_json_routeserver
+  let rs_json = http.render_json_routeserver(base_cfg.asn, [client_cfg])
+  string.contains(rs_json, "RFC 7947") |> should.equal(True)
+  string.contains(rs_json, "rs_peer_1") |> should.equal(True)
+  string.contains(rs_json, "transparent_as_path") |> should.equal(True)
+
+  // 2. Test render_json_bmp
+  let bmp_json = http.render_json_bmp([client_cfg])
+  string.contains(bmp_json, "RFC 7854") |> should.equal(True)
+  string.contains(bmp_json, "route_monitoring") |> should.equal(True)
+
+  // 3. Test dynamic reload
+  let srv = server.new_server(base_cfg)
+  let new_cfg = config.DaemonConfig(..base_cfg, peers: [client_cfg])
+  let #(srv_reloaded, events) = server.reload_config(srv, new_cfg)
+  list.length(events) |> should.equal(3)
+  server.get_peer_stats_list(srv_reloaded)
+  |> list.any(fn(p) { p.id == "rs_peer_1" })
+  |> should.equal(True)
+
+  // 4. Test peer removal via reload
+  let empty_cfg = config.DaemonConfig(..base_cfg, peers: [])
+  let #(srv_cleared, _events2) = server.reload_config(srv_reloaded, empty_cfg)
+  server.get_peer_stats_list(srv_cleared)
+  |> list.any(fn(p) { p.id == "rs_peer_1" })
+  |> should.equal(False)
 }
