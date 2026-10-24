@@ -65,6 +65,9 @@
       };
     });
     checks = eachSystem (system: { package = self.packages.${system}.default; });
+    hydraJobs = {
+      package = eachSystem (system: self.packages.${system}.default);
+    };
     devShells = eachSystem (system: {
       default = nixpkgs.legacyPackages.${system}.mkShell {
         packages = with nixpkgs.legacyPackages.${system}; [ gleam beamPackages.erlang rebar3 ];
