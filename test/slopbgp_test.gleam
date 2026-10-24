@@ -30,11 +30,13 @@ import slopbgp/bgp/graceful_shutdown.{
 }
 import slopbgp/bgp/l3vpn
 import slopbgp/bgp/llgr
-import slopbgp/bgp/message.{decode_message, encode_message}
+import slopbgp/bgp/message.{decode_message, encode_message, encode_open}
+import slopbgp/bgp/orr as bgp_orr
 import slopbgp/bgp/prefix_sid
 import slopbgp/bgp/rfc8212
 import slopbgp/bgp/rfc9234
 import slopbgp/bgp/routereflector
+import slopbgp/bgp/rtc as bgp_rtc
 import slopbgp/bgp/shutdown_communication.{
   decode_shutdown_communication, encode_shutdown_communication,
   format_cease_subcode, make_shutdown_notification,
@@ -64,10 +66,12 @@ import slopbgp/policy/filter as policy_filter
 import slopbgp/policy/optimizer as policy_optimizer
 import slopbgp/policy/trace as policy_trace
 import slopbgp/rib/multipath
+import slopbgp/rib/pic as bgp_pic
 import slopbgp/rib/rib.{compare_routes, insert_route, new_rib, withdraw_route}
 import slopbgp/routeserver/routeserver
 import slopbgp/rtr/client as rtr_client
 import slopbgp/rtr/message as rtr_msg
+import slopbgp/rtr/slurm as rtr_slurm
 import slopbgp/server
 import slopbgp/simulator.{run_simulation}
 import slopbgp/types.{
@@ -3493,4 +3497,291 @@ pub fn bgpsec_aspath_signature_test() {
 
   let json_rep = bgpsec.bgpsec_result_to_json(valid_res)
   string.contains(json_rep, "\"validity\":\"valid\"") |> should.equal(True)
+}
+
+// 52. RFC 9072 Extended Optional Parameters in OPEN Messages
+pub fn open_message_rfc9072_extended_optional_parameters_test() {
+  let add_path_caps =
+    list.repeat(CapAddPath(types.AfiUnknown(99), SafiUnicast, True, True), 40)
+  let all_caps = [
+    CapFourOctetAsn(4_242_420_125),
+    CapMultiProtocol(AfiIpv4, SafiUnicast),
+    CapMultiProtocol(AfiIpv6, SafiUnicast),
+    ..add_path_caps
+  ]
+  let bgp_id = Ipv4(172, 22, 64, 129)
+  let encoded = encode_open(4, 4_242_420_125, 240, bgp_id, all_caps)
+
+  let assert Ok(#(decoded, _rem)) = decode_message(encoded, False)
+  case decoded {
+    MsgOpen(version, resolved_as, hold_time, decoded_id, caps) -> {
+      version |> should.equal(4)
+      resolved_as |> should.equal(4_242_420_125)
+      hold_time |> should.equal(240)
+      decoded_id |> should.equal(bgp_id)
+      list.length(caps) |> should.equal(list.length(all_caps))
+    }
+    _ -> panic as "Expected MsgOpen"
+  }
+}
+
+// 53. RFC 8416 RPKI SLURM Local Overrides & Filtering
+pub fn slurm_json_and_evaluation_test() {
+  let slurm = rtr_slurm.default_dn42_slurm()
+  let encoded = rtr_slurm.encode_slurm(slurm)
+  string.contains(encoded, "\"slurmVersion\":1") |> should.equal(True)
+  string.contains(encoded, "prefixAssertions") |> should.equal(True)
+  string.contains(encoded, "prefixFilters") |> should.equal(True)
+
+  let assert Ok(decoded) = rtr_slurm.decode_slurm(encoded)
+  decoded.slurm_version |> should.equal(1)
+  list.length(decoded.prefix_assertions) |> should.equal(1)
+  list.length(decoded.prefix_filters) |> should.equal(1)
+
+  // Test local prefix assertion: 172.22.64.128/28 -> AS4242420125
+  let assert Ok(our_pfx) = parse_prefix("172.22.64.128/28")
+  let res_valid =
+    rtr_slurm.evaluate_slurm_route(our_pfx, 4_242_420_125, [], decoded)
+  res_valid |> should.equal(RoaValid)
+
+  // Test local assertion invalid origin: 172.22.64.128/28 -> AS4242429999
+  let res_invalid =
+    rtr_slurm.evaluate_slurm_route(our_pfx, 4_242_429_999, [], decoded)
+  res_invalid |> should.equal(RoaInvalid)
+
+  // Test prefix filter: filter out 172.20.99.0/24 from global ROA
+  let assert Ok(bogus_pfx) = parse_prefix("172.20.99.0/24")
+  let fake_roa =
+    types.RoaEntry(prefix: bogus_pfx, max_length: 24, asn: 4_242_429_999)
+  let res_filtered =
+    rtr_slurm.evaluate_slurm_route(
+      bogus_pfx,
+      4_242_429_999,
+      [fake_roa],
+      decoded,
+    )
+  // Because fake_roa was filtered out by SLURM prefixFilters, route evaluates to NOT_FOUND
+  res_filtered |> should.equal(RoaNotFound)
+}
+
+// 54. RFC 4684 Route Target Constraint (RTC) NLRI & Outbound VPN Filtering
+pub fn rtc_nlri_and_filtering_test() {
+  // Test 1: RtcDefault
+  let nlri_def = bgp_rtc.RtcNlri(bgp_rtc.RtcDefault)
+  let bin_def = bgp_rtc.encode_rtc_nlri(nlri_def)
+  let assert Ok([dec_def]) = bgp_rtc.decode_rtc_nlri(bin_def)
+  dec_def |> should.equal(nlri_def)
+
+  // Test 2: RtcOriginAs
+  let nlri_asn = bgp_rtc.RtcNlri(bgp_rtc.RtcOriginAs(4_242_420_125))
+  let bin_asn = bgp_rtc.encode_rtc_nlri(nlri_asn)
+  let assert Ok([dec_asn]) = bgp_rtc.decode_rtc_nlri(bin_asn)
+  dec_asn |> should.equal(nlri_asn)
+
+  // Test 3: RtcFull
+  let target = l3vpn.RtAsn4(4_242_420_125, 100)
+  let nlri_full = bgp_rtc.RtcNlri(bgp_rtc.RtcFull(4_242_420_125, target))
+  let bin_full = bgp_rtc.encode_rtc_nlri(nlri_full)
+  let assert Ok([dec_full]) = bgp_rtc.decode_rtc_nlri(bin_full)
+  dec_full |> should.equal(nlri_full)
+
+  // Test 4: RtcTable and outbound filtering
+  let table =
+    bgp_rtc.new_rtc_table()
+    |> bgp_rtc.add_peer_subscription(
+      "peer_fra",
+      4_242_421_732,
+      bgp_rtc.RtcFull(4_242_420_125, target),
+    )
+    |> bgp_rtc.add_peer_subscription(
+      "peer_ams",
+      4_242_420_001,
+      bgp_rtc.RtcDefault,
+    )
+
+  let assert Ok(pfx) = parse_prefix("10.100.1.0/24")
+  let ext_target1 = l3vpn.encode_route_target(target)
+  let ext_target2 = l3vpn.encode_route_target(l3vpn.RtAsn4(4_242_420_125, 999))
+
+  let route_matched =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [ext_target1],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "local",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let route_unmatched = Route(..route_matched, ext_communities: [ext_target2])
+
+  // peer_fra only subscribed to target1: route_matched admitted, route_unmatched suppressed
+  let #(admitted_fra, suppressed_fra) =
+    bgp_rtc.filter_outbound_vpn_routes(
+      [route_matched, route_unmatched],
+      "peer_fra",
+      table,
+    )
+  list.length(admitted_fra) |> should.equal(1)
+  suppressed_fra |> should.equal(1)
+
+  // peer_ams subscribed to RtcDefault wildcard: both routes admitted
+  let #(admitted_ams, suppressed_ams) =
+    bgp_rtc.filter_outbound_vpn_routes(
+      [route_matched, route_unmatched],
+      "peer_ams",
+      table,
+    )
+  list.length(admitted_ams) |> should.equal(2)
+  suppressed_ams |> should.equal(0)
+}
+
+// 55. RFC 9107 BGP Optimal Route Reflection (BGP-ORR) & Deflection Avoidance
+pub fn orr_best_path_and_deflection_audit_test() {
+  let assert Ok(pfx) = parse_prefix("172.20.1.0/24")
+  let cand_fra =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_fra",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let cand_nyc =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 2),
+      med: 0,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "peer_nyc",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let cfg = bgp_orr.default_dn42_orr_config()
+
+  // From RR (Frankfurt) perspective: next-hop 172.22.64.1 has cost 5 vs 90
+  let assert Some(rr_best) =
+    bgp_orr.select_orr_best_route([cand_fra, cand_nyc], cfg.rr_igp_costs)
+  rr_best.peer_id |> should.equal("peer_fra")
+
+  // From NYC client group perspective: next-hop 172.22.64.2 has cost 8 vs 90
+  let assert Ok(nyc_grp) =
+    list.find(cfg.groups, fn(g) { g.name == "north-america" })
+  let assert Some(nyc_best) =
+    bgp_orr.select_orr_best_route([cand_fra, cand_nyc], nyc_grp.igp_costs)
+  nyc_best.peer_id |> should.equal("peer_nyc")
+
+  // Audit deflection
+  let audits =
+    bgp_orr.audit_orr_deflections([#(pfx, [cand_fra, cand_nyc])], cfg)
+  let assert Ok(nyc_audit) =
+    list.find(audits, fn(a) { a.client_id == "slop_nyc1" })
+  nyc_audit.deflection_avoided |> should.equal(True)
+  nyc_audit.cost_saved |> should.equal(82)
+}
+
+// 56. BGP Prefix-Independent Convergence (BGP-PIC) & Fast Reroute
+pub fn bgp_pic_fast_reroute_test() {
+  let assert Ok(pfx) = parse_prefix("172.22.64.0/27")
+  let r_primary =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732])],
+      next_hop: Ipv4(172, 22, 64, 1),
+      med: 10,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "baragoon_fra",
+      timestamp: 100,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let r_backup =
+    Route(
+      prefix: pfx,
+      origin: OriginIgp,
+      as_path: [AsSequence([4_242_421_732, 4_242_420_001])],
+      next_hop: Ipv4(172, 22, 64, 2),
+      med: 20,
+      local_pref: 100,
+      atomic_aggregate: False,
+      communities: [],
+      large_communities: [],
+      ext_communities: [],
+      otc: None,
+      roa_status: RoaValid,
+      peer_id: "slop_ams",
+      timestamp: 101,
+      path_id: None,
+      originator_id: None,
+      cluster_list: [],
+    )
+
+  let table = bgp_pic.build_pic_table([#(pfx, [r_primary, r_backup])])
+  let stats = bgp_pic.calculate_pic_coverage(table)
+  stats.total_prefixes |> should.equal(1)
+  stats.protected_prefixes |> should.equal(1)
+  stats.coverage_percent |> should.equal(100.0)
+
+  // Trigger next-hop failover on primary
+  let #(failed_table, events) =
+    bgp_pic.trigger_next_hop_failover(table, Ipv4(172, 22, 64, 1))
+  list.length(events) |> should.equal(1)
+  let assert [ev] = events
+  ev.switched_prefixes_count |> should.equal(1)
+  ev.backup_next_hop |> should.equal(Ipv4(172, 22, 64, 2))
+
+  // Route now forwards via backup
+  let p_str = prefix_to_string(pfx)
+  let assert Ok(entry) = dict.get(failed_table.routes, p_str)
+  entry.effective_next_hop |> should.equal(Ipv4(172, 22, 64, 2))
+
+  // Restore primary
+  let restored_table =
+    bgp_pic.restore_next_hop(failed_table, Ipv4(172, 22, 64, 1))
+  let assert Ok(restored_entry) = dict.get(restored_table.routes, p_str)
+  restored_entry.effective_next_hop |> should.equal(Ipv4(172, 22, 64, 1))
 }

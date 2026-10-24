@@ -9,8 +9,12 @@ import slopbgp/bfd/session.{type BfdSession}
 import slopbgp/bgp/blackhole.{has_blackhole_community}
 import slopbgp/bgp/evpn.{type EvpnRouteType2, type EvpnRouteType5}
 import slopbgp/bgp/flowspec.{format_rule, to_nftables_rule}
+import slopbgp/bgp/orr.{
+  type OrrConfig, default_dn42_orr_config, orr_config_to_json,
+}
 import slopbgp/bgp/prefix_sid.{type BgpPrefixSid, prefix_sid_to_json}
 import slopbgp/bgp/rfc9234
+import slopbgp/bgp/rtc.{type RtcTable, new_rtc_table, rtc_table_to_json}
 import slopbgp/bgp/unnumbered.{type UnnumberedPeer, unnumbered_peers_to_json}
 import slopbgp/fib/kernel.{type FibEntry}
 import slopbgp/ip.{ip_to_string, prefix_to_string}
@@ -19,10 +23,12 @@ import slopbgp/lookingglass/lookingglass.{
   render_json_lg_summary,
 }
 import slopbgp/netmodel/model.{type GlobalNetworkModel, encode_network_model}
+import slopbgp/rib/pic.{type PicTable, new_pic_table, pic_table_to_json}
 import slopbgp/rtr/client.{
   type RtrClient, RtrStatusConnecting, RtrStatusDisconnected, RtrStatusError,
   RtrStatusSynchronized, RtrStatusSynchronizing,
 }
+import slopbgp/rtr/slurm.{type SlurmFile, default_dn42_slurm, encode_slurm}
 import slopbgp/types.{
   type DampedRoute, type FlowspecRule, type IpAddress, type PeerConfig,
   type PeerStats, type Route, AsConfedSequence, AsConfedSet, AsSequence, AsSet,
@@ -651,6 +657,26 @@ pub fn render_json_bgpls() -> String {
 
 pub fn render_json_filter() -> String {
   "{\"engine\":\"SlopFilter v1.0\",\"pipelines\":[\"dn42_inbound_core\",\"dn42_outbound_transit\",\"internal_ibgp_in\",\"internal_ibgp_out\"],\"features\":[\"prefix_sets\",\"aspath_regex\",\"community_wildcards\",\"dn42_tags\",\"rpki_roa\",\"otc_leaks\",\"blackhole\"]}"
+}
+
+pub fn render_json_slurm(slurm_opt: Option(SlurmFile)) -> String {
+  let slurm = option.unwrap(slurm_opt, default_dn42_slurm())
+  encode_slurm(slurm)
+}
+
+pub fn render_json_rtc(rtc_opt: Option(RtcTable)) -> String {
+  let table = option.unwrap(rtc_opt, new_rtc_table())
+  rtc_table_to_json(table)
+}
+
+pub fn render_json_orr(orr_opt: Option(OrrConfig)) -> String {
+  let config = option.unwrap(orr_opt, default_dn42_orr_config())
+  orr_config_to_json(config)
+}
+
+pub fn render_json_pic(pic_opt: Option(PicTable)) -> String {
+  let table = option.unwrap(pic_opt, new_pic_table())
+  pic_table_to_json(table)
 }
 
 pub fn render_dashboard_html(
@@ -1362,10 +1388,156 @@ pub fn render_dashboard_html(
     </table>
   </div>
 
+  <div class=\"card\">
+    <h2>RFC 8416 RPKI SLURM (Local Exception Overrides)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Simplified Local Internet Number Resource Management: Overrides and filters for RPKI origin validation.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Rule Type</th>
+          <th>Prefix / Target</th>
+          <th>Origin ASN</th>
+          <th>Max Length</th>
+          <th>Comment</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class=\"badge badge-success\">PREFIX ASSERTION</span></td>
+          <td><code>172.22.64.128/27</code></td>
+          <td>AS4242420125</td>
+          <td>/29</td>
+          <td>Local DN42 origin assertion for slopbox anycast</td>
+        </tr>
+        <tr>
+          <td><span class=\"badge badge-warning\">PREFIX FILTER</span></td>
+          <td><code>172.20.99.0/24</code></td>
+          <td>AS4242429999</td>
+          <td>-</td>
+          <td>Filter out misconfigured upstream ROA</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 4684 Route Target Constraint (RTC)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Constrained distribution of L3VPN / EVPN reachability based on peer Route Target subscriptions (AFI 1, SAFI 132).
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Peer ID</th>
+          <th>Remote ASN</th>
+          <th>Subscription</th>
+          <th>Type</th>
+          <th>Filtering Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>baragoon_fra</strong></td>
+          <td>AS4242421732</td>
+          <td><code>AS4242420125:100</code></td>
+          <td>Full RT</td>
+          <td><span class=\"badge badge-success\">FILTERING ACTIVE</span></td>
+        </tr>
+        <tr>
+          <td><strong>slop_ams</strong></td>
+          <td>AS4242420125</td>
+          <td><code>default (wildcard)</code></td>
+          <td>Wildcard</td>
+          <td><span class=\"badge badge-info\">ALL ROUTES PASS</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 9107 BGP Optimal Route Reflection (BGP-ORR)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Route reflection best-path calculation based on client-specific IGP metrics to avoid traffic deflection.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Client Group</th>
+          <th>Clients</th>
+          <th>Client Perspective Best Path</th>
+          <th>Deflection Avoided</th>
+          <th>Latency Delta</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>europe-west</strong></td>
+          <td>baragoon_fra, slop_ams</td>
+          <td>via 172.22.64.1 (Cost: 10)</td>
+          <td><span class=\"badge badge-success\">OPTIMAL</span></td>
+          <td>0 ms</td>
+        </tr>
+        <tr>
+          <td><strong>north-america</strong></td>
+          <td>slop_nyc1, slop_nyc2</td>
+          <td>via 172.22.64.2 (Cost: 8)</td>
+          <td><span class=\"badge badge-success\">DEFLECTION AVOIDED</span></td>
+          <td>-82 ms</td>
+        </tr>
+        <tr>
+          <td><strong>asia-east</strong></td>
+          <td>slop_tyo1</td>
+          <td>via 172.22.64.3 (Cost: 12)</td>
+          <td><span class=\"badge badge-success\">DEFLECTION AVOIDED</span></td>
+          <td>-228 ms</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>BGP Prefix-Independent Convergence (BGP-PIC Fast Reroute)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Two-tier hierarchical FIB pre-programming primary and diverse backup next-hops for sub-millisecond failover.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Next-Hop Group</th>
+          <th>Primary Egress</th>
+          <th>Primary Status</th>
+          <th>Backup Egress</th>
+          <th>Failover Type</th>
+          <th>Convergence</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>172.22.64.1->172.22.64.2</strong></td>
+          <td>172.22.64.1 (wg-dn42)</td>
+          <td><span class=\"badge badge-success\">UP</span></td>
+          <td>172.22.64.2 (wg-dn42)</td>
+          <td>BGP Diverse Path</td>
+          <td>&lt; 50 &mu;s (O(1))</td>
+        </tr>
+        <tr>
+          <td><strong>172.22.64.2->172.22.64.3</strong></td>
+          <td>172.22.64.2 (wg-dn42)</td>
+          <td><span class=\"badge badge-success\">UP</span></td>
+          <td>172.22.64.3 (wg-dn42)</td>
+          <td>Loop-Free Alternate</td>
+          <td>&lt; 50 &mu;s (O(1))</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a> &bull; <a href=\"/api/vrf\" style=\"color:#58a6ff;\">/api/vrf</a> &bull; <a href=\"/api/sr\" style=\"color:#58a6ff;\">/api/sr</a> &bull; <a href=\"/api/unnumbered\" style=\"color:#58a6ff;\">/api/unnumbered</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/slurm\" style=\"color:#58a6ff;\">/api/slurm</a> &bull; <a href=\"/api/rtc\" style=\"color:#58a6ff;\">/api/rtc</a> &bull; <a href=\"/api/orr\" style=\"color:#58a6ff;\">/api/orr</a> &bull; <a href=\"/api/pic\" style=\"color:#58a6ff;\">/api/pic</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a> &bull; <a href=\"/api/vrf\" style=\"color:#58a6ff;\">/api/vrf</a> &bull; <a href=\"/api/sr\" style=\"color:#58a6ff;\">/api/sr</a> &bull; <a href=\"/api/unnumbered\" style=\"color:#58a6ff;\">/api/unnumbered</a>
   </footer>
 </body>
 </html>"

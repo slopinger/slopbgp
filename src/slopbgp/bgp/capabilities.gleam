@@ -7,7 +7,8 @@ import slopbgp/types.{
   CapFourOctetAsn, CapGracefulRestart, CapLongLivedGracefulRestart,
   CapMultiProtocol, CapRouteRefresh, CapUnknown, LlgrAfiSafi, RoleCustomer,
   RolePeer, RoleProvider, RoleRouteServer, RoleRouteServerClient, RoleUnknown,
-  SafiEvpn, SafiFlowspec, SafiMplsVpn, SafiMulticast, SafiUnicast, SafiUnknown,
+  SafiEvpn, SafiFlowspec, SafiMplsVpn, SafiMulticast, SafiRtc, SafiUnicast,
+  SafiUnknown,
 }
 
 pub fn afi_to_int(afi: Afi) -> Int {
@@ -34,6 +35,7 @@ pub fn safi_to_int(safi: Safi) -> Int {
     SafiMulticast -> 2
     SafiEvpn -> 70
     SafiMplsVpn -> 128
+    SafiRtc -> 132
     SafiFlowspec -> 133
     SafiUnknown(code) -> code
   }
@@ -45,6 +47,7 @@ pub fn int_to_safi(code: Int) -> Safi {
     2 -> SafiMulticast
     70 -> SafiEvpn
     128 -> SafiMplsVpn
+    132 -> SafiRtc
     133 -> SafiFlowspec
     _ -> SafiUnknown(code)
   }

@@ -58,11 +58,23 @@ pub fn encode_open(
     })
   let caps_len = byte_length(caps_bin)
 
-  let opt_params = case caps_len > 0 {
-    True -> <<2:8, caps_len:8, caps_bin:bits>>
-    False -> <<>>
+  let #(opt_len, opt_params) = case caps_len > 255 {
+    True -> {
+      // RFC 9072 Extended Optional Parameters format
+      let param = <<2:8, caps_len:16, caps_bin:bits>>
+      let ext_len = byte_length(param)
+      #(255, <<ext_len:16, param:bits>>)
+    }
+    False -> {
+      case caps_len > 0 {
+        True -> {
+          let p = <<2:8, caps_len:8, caps_bin:bits>>
+          #(byte_length(p), p)
+        }
+        False -> #(0, <<>>)
+      }
+    }
   }
-  let opt_len = byte_length(opt_params)
 
   let body = <<
     version:8,
@@ -199,11 +211,34 @@ fn decode_open_body(body: BitArray) -> Result(BgpMessage, String) {
       my_as:16,
       hold_time:16,
       bgp_id_raw:bits-size(32),
-      _opt_len:8,
+      opt_len:8,
       opt_raw:bits,
     >> -> {
       use bgp_id <- result.try(bytes_to_ipv4(bgp_id_raw))
-      let caps = decode_opt_params(opt_raw)
+      let caps = case opt_len {
+        255 -> {
+          // RFC 9072: Extended Optional Parameters
+          case opt_raw {
+            <<ext_opt_len:16, ext_body:bits>> -> {
+              let bits_needed = ext_opt_len * 8
+              case ext_body {
+                <<ext_data:bits-size(bits_needed), _rem:bits>> ->
+                  decode_ext_opt_params_loop(ext_data, [])
+                _ -> decode_ext_opt_params_loop(ext_body, [])
+              }
+            }
+            _ -> []
+          }
+        }
+        _ -> {
+          let bits_needed = opt_len * 8
+          case opt_raw {
+            <<opt_data:bits-size(bits_needed), _rem:bits>> ->
+              decode_opt_params(opt_data)
+            _ -> decode_opt_params(opt_raw)
+          }
+        }
+      }
       let resolved_as = case
         list.find(caps, fn(c) {
           case c {
@@ -241,6 +276,31 @@ fn decode_opt_params_loop(
               decode_opt_params_loop(rem, list.append(caps, acc))
             }
             _ -> decode_opt_params_loop(rem, acc)
+          }
+        }
+        _ -> list.reverse(acc)
+      }
+    }
+    _ -> list.reverse(acc)
+  }
+}
+
+fn decode_ext_opt_params_loop(
+  bytes: BitArray,
+  acc: List(BgpCapability),
+) -> List(BgpCapability) {
+  case bytes {
+    <<>> -> list.reverse(acc)
+    <<param_type:8, param_len:16, rest:bits>> -> {
+      let bits_needed = param_len * 8
+      case rest {
+        <<val:bits-size(bits_needed), rem:bits>> -> {
+          case param_type {
+            2 -> {
+              let caps = decode_capabilities(val)
+              decode_ext_opt_params_loop(rem, list.append(caps, acc))
+            }
+            _ -> decode_ext_opt_params_loop(rem, acc)
           }
         }
         _ -> list.reverse(acc)

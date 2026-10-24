@@ -65,6 +65,11 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 8538** | BGP Long-Lived Graceful Restart (LLGR Capability 71, LLGR_STALE & NO_LLGR Communities) | Full |
 | **RFC 7938** | Use of BGP for Routing in Large-Scale Data Centers (Equal-Cost Multi-Path ECMP & UCMP Weighted Bandwidth) | Full |
 | **RFC 8205** | BGPsec Path Signatures & AS-Path Cryptographic Security (ECDSA P-256 Signatures & Target AS Chaining) | Full |
+| **RFC 9072** | Extended Optional Parameters Length for BGP OPEN Messages (up to 65,535 bytes) | Full |
+| **RFC 8416** | Simplified Local Internet Number Resource Management with the RPKI (SLURM Local Exceptions) | Full |
+| **RFC 4684** | Constrained Route Distribution for BGP/MPLS IP VPNs (Route Target Constraint - RTC) | Full |
+| **RFC 9107** | BGP Optimal Route Reflection (BGP-ORR: Perspective-Based Client Best-Path & Deflection Avoidance) | Full |
+| **BGP-PIC** | BGP Prefix-Independent Convergence (BGP-PIC Edge/Core & Sub-Millisecond O(1) Fast Reroute) | Full |
 
 ---
 
@@ -307,19 +312,39 @@ slopbgpctl filter audit
 
 # Inspect SlopFilter policy pipeline & RFC 7938 route hygiene
 slopbgpctl filter
+
+# Evaluate route origin with RFC 8416 RPKI SLURM local assertions & filters
+slopbgpctl slurm check 172.22.64.128/28 4242420125
+slopbgpctl slurm validate slurm.json
+slopbgpctl slurm
+
+# Inspect RFC 4684 Route Target Constraint (RTC) subscriptions & outbound VPN filtering
+slopbgpctl rtc table
+slopbgpctl rtc filter baragoon_fra 4242420125:100
+slopbgpctl rtc
+
+# Calculate RFC 9107 BGP Optimal Route Reflection (BGP-ORR) client paths & audit deflection
+slopbgpctl orr matrix
+slopbgpctl orr bestpath slop_nyc1 172.20.1.0/24
+slopbgpctl orr audit
+
+# Inspect BGP Prefix-Independent Convergence (BGP-PIC) & simulate sub-millisecond fast failover
+slopbgpctl pic routes
+slopbgpctl pic failover 172.22.64.1
+slopbgpctl pic status
 ```
 
 ---
 
 ## Web Dashboard & Interactive Network Topology
 
-`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, Flap damping decay, Multi-VRF Isolation, Segment Routing SIDs, and BGP Unnumbered peer status:
+`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, Flap damping decay, Multi-VRF Isolation, Segment Routing SIDs, BGP Unnumbered peer status, RFC 8416 SLURM overrides, RFC 4684 RTC subscriptions, RFC 9107 BGP-ORR client perspectives, and BGP-PIC fast reroute:
 
 ![slopbgp Dashboard](screenshots/dashboard_full.png)
 
 * **Real-time Radial SVG Peering Graph**: Visualizes local router hub with glowing session states (Established in green, Syncing/Drained in amber, Inactive in red/gray).
 * **Carrier Looking Glass**: Live route queries with exact and longest-prefix match (LPM), AS-Path traversal inspection, and Community filters.
-* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`, `/api/vrf`, `/api/sr`, `/api/unnumbered`.
+* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/slurm`, `/api/rtc`, `/api/orr`, `/api/pic`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`, `/api/vrf`, `/api/sr`, `/api/unnumbered`.
 * **Zero External Dependencies**: Pure SVG and HTML rendered by the daemon without requiring node, webpack, or javascript bundles.
 
 ---
@@ -354,7 +379,7 @@ nix develop
 ### With Gleam
 
 ```bash
-# Run unit and integration test suite (51 test suites passing)
+# Run unit and integration test suite (56 test suites passing)
 gleam test
 
 # Format code

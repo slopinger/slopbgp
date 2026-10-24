@@ -21,6 +21,7 @@ pub type Safi {
   SafiMulticast
   SafiEvpn
   SafiMplsVpn
+  SafiRtc
   SafiFlowspec
   SafiUnknown(Int)
 }

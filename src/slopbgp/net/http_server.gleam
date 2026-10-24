@@ -355,6 +355,18 @@ fn dispatch_route(path: String, srv: ServerState) -> #(String, String, String) {
 
     "/api/filter" -> #("200 OK", "application/json", http.render_json_filter())
 
+    "/api/slurm" -> #(
+      "200 OK",
+      "application/json",
+      http.render_json_slurm(None),
+    )
+
+    "/api/rtc" -> #("200 OK", "application/json", http.render_json_rtc(None))
+
+    "/api/orr" -> #("200 OK", "application/json", http.render_json_orr(None))
+
+    "/api/pic" -> #("200 OK", "application/json", http.render_json_pic(None))
+
     _ -> #("404 Not Found", "application/json", "{\"error\":\"Not Found\"}\n")
   }
 }
