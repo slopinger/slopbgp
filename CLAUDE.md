@@ -7,7 +7,7 @@ feature/RFC reference and CLI guide; keep it, this file and the Nix packaging cu
 - Architecture: one OTP actor per peer session (crashes never take down the Loc-RIB or
   other peers), binary pattern matching for BGP framing, Loc-RIB decision engine, FIB sync
   into an isolated Linux routing table (42 by default).
-- Checks: `gleam format --check src test`, `gleam test` (56 suites). Nix: `nix build`
+- Checks: `gleam format --check src test`, `gleam test` (58 suites). Nix: `nix build`
   (offline sandbox build from the committed `manifest.toml`; produces `bin/slopbgp` and
   `bin/slopbgpctl`), `nix flake check`, `nix develop`; commit `flake.lock`.
   `nixosModules.default` exports `services.slopbgp`.

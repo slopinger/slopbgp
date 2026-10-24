@@ -19,7 +19,9 @@ pub type Afi {
 pub type Safi {
   SafiUnicast
   SafiMulticast
+  SafiLabeledUnicast
   SafiEvpn
+  SafiSrPolicy
   SafiMplsVpn
   SafiRtc
   SafiFlowspec

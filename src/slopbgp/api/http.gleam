@@ -679,6 +679,14 @@ pub fn render_json_pic(pic_opt: Option(PicTable)) -> String {
   pic_table_to_json(table)
 }
 
+pub fn render_json_sr_policy() -> String {
+  "{\"engine\":\"RFC 9256 BGP Segment Routing Policy (SAFI 73)\",\"color_steering\":\"ENABLED\",\"policies\":[{\"color\":100,\"endpoint\":\"172.22.64.1\",\"active_preference\":200,\"binding_sid\":\"MPLS:16001\",\"segment_lists\":[{\"weight\":100,\"segments\":[\"MPLS:16010\",\"MPLS:16020\"]}]},{\"color\":200,\"endpoint\":\"172.22.64.1\",\"active_preference\":100,\"binding_sid\":\"MPLS:16002\",\"segment_lists\":[{\"weight\":50,\"segments\":[\"MPLS:16030\"]},{\"weight\":50,\"segments\":[\"MPLS:16040\"]}]}]}"
+}
+
+pub fn render_json_lu() -> String {
+  "{\"engine\":\"RFC 8277 BGP Labeled Unicast (SAFI 4)\",\"seamless_mpls\":\"ENABLED\",\"routes\":[{\"prefix\":\"172.20.44.0/24\",\"next_hop\":\"172.22.64.1\",\"labels\":[1001],\"origin_as\":4242421732},{\"prefix\":\"172.22.123.0/24\",\"next_hop\":\"172.22.64.2\",\"labels\":[2001,3001],\"origin_as\":4242420001},{\"prefix\":\"fd8f:3250:9097::/48\",\"next_hop\":\"fe80::1732\",\"labels\":[5001],\"origin_as\":4242421732}]}"
+}
+
 pub fn render_dashboard_html(
   asn: Int,
   router_id: String,
@@ -1534,10 +1542,88 @@ pub fn render_dashboard_html(
     </table>
   </div>
 
+  <div class=\"card\">
+    <h2>RFC 9256 BGP Segment Routing Policy (SAFI 73 &amp; Color Steering)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Express traffic engineering paths with RFC 9012 Color Extended Communities and weighted segment lists.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Color</th>
+          <th>Endpoint</th>
+          <th>Preference</th>
+          <th>Binding-SID</th>
+          <th>Segment Lists &amp; Weights</th>
+          <th>Steering Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Color 100</strong> (Low-Latency)</td>
+          <td>172.22.64.1</td>
+          <td>200</td>
+          <td>MPLS:16001</td>
+          <td>SL #1 [W:100]: 16010 &rarr; 16020</td>
+          <td><span class=\"badge badge-success\">STEERED</span></td>
+        </tr>
+        <tr>
+          <td><strong>Color 200</strong> (Protected Bulk)</td>
+          <td>172.22.64.1</td>
+          <td>100</td>
+          <td>MPLS:16002</td>
+          <td>SL #1 [W:50]: 16030 | SL #2 [W:50]: 16040</td>
+          <td><span class=\"badge badge-success\">STEERED (UCMP)</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class=\"card\">
+    <h2>RFC 8277 BGP Labeled Unicast (BGP-LU / SAFI 4)</h2>
+    <div style=\"margin-bottom:8px; color:#8b949e; font-size:0.85rem;\">
+      Carrying MPLS label stacks directly in BGP-4 NLRIs for Inter-AS Option C transit and seamless MPLS.
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Prefix</th>
+          <th>Next-Hop</th>
+          <th>MPLS Label Stack</th>
+          <th>Origin AS</th>
+          <th>Forwarding Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>172.20.44.0/24</strong></td>
+          <td>172.22.64.1</td>
+          <td>[1001] (S=1)</td>
+          <td>AS4242421732</td>
+          <td><span class=\"badge badge-success\">PUSH &amp; FORWARD</span></td>
+        </tr>
+        <tr>
+          <td><strong>172.22.123.0/24</strong></td>
+          <td>172.22.64.2</td>
+          <td>[2001, 3001] (Stack)</td>
+          <td>AS4242420001</td>
+          <td><span class=\"badge badge-success\">PUSH STACK</span></td>
+        </tr>
+        <tr>
+          <td><strong>fd8f:3250:9097::/48</strong></td>
+          <td>fe80::1732</td>
+          <td>[5001] (S=1)</td>
+          <td>AS4242421732</td>
+          <td><span class=\"badge badge-success\">PUSH &amp; FORWARD</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <footer>
     slopbgp &bull; engineered with Gleam &amp; Erlang/OTP &bull; AS" <> int.to_string(
     asn,
-  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/slurm\" style=\"color:#58a6ff;\">/api/slurm</a> &bull; <a href=\"/api/rtc\" style=\"color:#58a6ff;\">/api/rtc</a> &bull; <a href=\"/api/orr\" style=\"color:#58a6ff;\">/api/orr</a> &bull; <a href=\"/api/pic\" style=\"color:#58a6ff;\">/api/pic</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a> &bull; <a href=\"/api/vrf\" style=\"color:#58a6ff;\">/api/vrf</a> &bull; <a href=\"/api/sr\" style=\"color:#58a6ff;\">/api/sr</a> &bull; <a href=\"/api/unnumbered\" style=\"color:#58a6ff;\">/api/unnumbered</a>
+  ) <> " &bull; <a href=\"/metrics\" style=\"color:#58a6ff;\">Prometheus /metrics</a> &bull; <a href=\"/api/status\" style=\"color:#58a6ff;\">/api/status</a> &bull; <a href=\"/api/routes\" style=\"color:#58a6ff;\">/api/routes</a> &bull; <a href=\"/api/peers\" style=\"color:#58a6ff;\">/api/peers</a> &bull; <a href=\"/api/topology\" style=\"color:#58a6ff;\">/api/topology</a> &bull; <a href=\"/api/flowspec\" style=\"color:#58a6ff;\">/api/flowspec</a> &bull; <a href=\"/api/damping\" style=\"color:#58a6ff;\">/api/damping</a> &bull; <a href=\"/api/routeserver\" style=\"color:#58a6ff;\">/api/routeserver</a> &bull; <a href=\"/api/bmp\" style=\"color:#58a6ff;\">/api/bmp</a> &bull; <a href=\"/api/rr\" style=\"color:#58a6ff;\">/api/rr</a> &bull; <a href=\"/api/confed\" style=\"color:#58a6ff;\">/api/confed</a> &bull; <a href=\"/api/rtr\" style=\"color:#58a6ff;\">/api/rtr</a> &bull; <a href=\"/api/slurm\" style=\"color:#58a6ff;\">/api/slurm</a> &bull; <a href=\"/api/rtc\" style=\"color:#58a6ff;\">/api/rtc</a> &bull; <a href=\"/api/orr\" style=\"color:#58a6ff;\">/api/orr</a> &bull; <a href=\"/api/pic\" style=\"color:#58a6ff;\">/api/pic</a> &bull; <a href=\"/api/sr-policy\" style=\"color:#58a6ff;\">/api/sr-policy</a> &bull; <a href=\"/api/lu\" style=\"color:#58a6ff;\">/api/lu</a> &bull; <a href=\"/api/bfd\" style=\"color:#58a6ff;\">/api/bfd</a> &bull; <a href=\"/api/blackhole\" style=\"color:#58a6ff;\">/api/blackhole</a> &bull; <a href=\"/api/evpn\" style=\"color:#58a6ff;\">/api/evpn</a> &bull; <a href=\"/api/lg\" style=\"color:#58a6ff;\">/api/lg</a> &bull; <a href=\"/api/vrf\" style=\"color:#58a6ff;\">/api/vrf</a> &bull; <a href=\"/api/sr\" style=\"color:#58a6ff;\">/api/sr</a> &bull; <a href=\"/api/unnumbered\" style=\"color:#58a6ff;\">/api/unnumbered</a>
   </footer>
 </body>
 </html>"

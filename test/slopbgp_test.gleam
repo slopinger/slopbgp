@@ -29,6 +29,7 @@ import slopbgp/bgp/graceful_shutdown.{
   graceful_shutdown_community, has_graceful_shutdown,
 }
 import slopbgp/bgp/l3vpn
+import slopbgp/bgp/labeled_unicast as bgp_lu
 import slopbgp/bgp/llgr
 import slopbgp/bgp/message.{decode_message, encode_message, encode_open}
 import slopbgp/bgp/orr as bgp_orr
@@ -41,6 +42,7 @@ import slopbgp/bgp/shutdown_communication.{
   decode_shutdown_communication, encode_shutdown_communication,
   format_cease_subcode, make_shutdown_notification,
 }
+import slopbgp/bgp/sr_policy as bgp_sr_policy
 import slopbgp/bgp/unnumbered
 import slopbgp/bmp/message as bmp_message
 import slopbgp/config
@@ -3784,4 +3786,229 @@ pub fn bgp_pic_fast_reroute_test() {
     bgp_pic.restore_next_hop(failed_table, Ipv4(172, 22, 64, 1))
   let assert Ok(restored_entry) = dict.get(restored_table.routes, p_str)
   restored_entry.effective_next_hop |> should.equal(Ipv4(172, 22, 64, 1))
+}
+
+// 57. RFC 9256 BGP Segment Routing Policy (SAFI 73) & Color Steering
+pub fn rfc9256_sr_policy_color_steering_test() {
+  // 1. SR Policy NLRI Framing (IPv4 & IPv6 Endpoints)
+  let nlri_v4 =
+    bgp_sr_policy.SrPolicyNlri(
+      distinguisher: 1,
+      color: 100,
+      endpoint: Ipv4(172, 22, 64, 1),
+    )
+  let bin_v4 = bgp_sr_policy.encode_sr_policy_nlri(nlri_v4)
+  let assert Ok(dec_v4) =
+    bgp_sr_policy.decode_sr_policy_nlri(types.AfiIpv4, bin_v4)
+  dec_v4.distinguisher |> should.equal(1)
+  dec_v4.color |> should.equal(100)
+  dec_v4.endpoint |> should.equal(Ipv4(172, 22, 64, 1))
+
+  let nlri_v6 =
+    bgp_sr_policy.SrPolicyNlri(
+      distinguisher: 2,
+      color: 200,
+      endpoint: Ipv6(0xfd00, 0x42, 0, 0, 0, 0, 0, 1),
+    )
+  let bin_v6 = bgp_sr_policy.encode_sr_policy_nlri(nlri_v6)
+  let assert Ok(dec_v6) =
+    bgp_sr_policy.decode_sr_policy_nlri(types.AfiIpv6, bin_v6)
+  dec_v6.color |> should.equal(200)
+  dec_v6.endpoint |> should.equal(Ipv6(0xfd00, 0x42, 0, 0, 0, 0, 0, 1))
+
+  // 2. Color Extended Community (RFC 9012 Section 4.3)
+  let color_comm = bgp_sr_policy.encode_color_extended_community(100)
+  color_comm.type_code |> should.equal(0x08)
+  color_comm.sub_type |> should.equal(0x0b)
+  let assert Ok(decoded_color) =
+    bgp_sr_policy.decode_color_extended_community(color_comm)
+  decoded_color |> should.equal(100)
+
+  // 3. Tunnel Encapsulation Attribute (Type 23, Tunnel Type 15: SR Policy)
+  let seg_lists = [
+    bgp_sr_policy.SegmentList(weight: 100, segments: [
+      bgp_sr_policy.SegmentMpls(label: 16_010, tc: 0, s: False, ttl: 64),
+      bgp_sr_policy.SegmentMpls(label: 16_020, tc: 0, s: True, ttl: 64),
+    ]),
+    bgp_sr_policy.SegmentList(weight: 50, segments: [
+      bgp_sr_policy.SegmentMpls(label: 16_030, tc: 0, s: True, ttl: 64),
+    ]),
+  ]
+  let encap_bytes =
+    bgp_sr_policy.encode_tunnel_encap_sr_policy(
+      200,
+      Some(bgp_sr_policy.BindingMpls(16_001)),
+      seg_lists,
+    )
+  let assert Ok(#(pref, bsid_opt, decoded_sls)) =
+    bgp_sr_policy.decode_tunnel_encap_sr_policy(encap_bytes)
+  pref |> should.equal(200)
+  bsid_opt |> should.equal(Some(bgp_sr_policy.BindingMpls(16_001)))
+  list.length(decoded_sls) |> should.equal(2)
+
+  // 4. Candidate Path Selection (RFC 9256 Section 2.7)
+  let path_low_pref =
+    bgp_sr_policy.SrCandidatePath(
+      preference: 100,
+      binding_sid: None,
+      segment_lists: seg_lists,
+      protocol_origin: 20,
+      originator_asn: 4_242_421_732,
+      discriminator: 1,
+    )
+  let path_high_pref =
+    bgp_sr_policy.SrCandidatePath(
+      preference: 200,
+      binding_sid: Some(bgp_sr_policy.BindingMpls(16_001)),
+      segment_lists: seg_lists,
+      protocol_origin: 20,
+      originator_asn: 4_242_421_732,
+      discriminator: 2,
+    )
+  let path_cli_pref =
+    bgp_sr_policy.SrCandidatePath(
+      preference: 200,
+      binding_sid: Some(bgp_sr_policy.BindingMpls(16_001)),
+      segment_lists: seg_lists,
+      protocol_origin: 30,
+      originator_asn: 4_242_420_125,
+      discriminator: 3,
+    )
+  let assert Some(best_path) =
+    bgp_sr_policy.select_active_candidate_path([
+      path_low_pref,
+      path_high_pref,
+      path_cli_pref,
+    ])
+  best_path.protocol_origin |> should.equal(30)
+  best_path.discriminator |> should.equal(3)
+
+  // 5. SR Policy Table & Dynamic Color Steering
+  let tbl0 = bgp_sr_policy.new_sr_policy_table()
+  let tbl1 =
+    bgp_sr_policy.update_sr_policy(
+      tbl0,
+      100,
+      Ipv4(172, 22, 64, 1),
+      path_cli_pref,
+    )
+
+  let assert Ok(pfx) = parse_prefix("172.20.100.0/24")
+
+  // Case A: Route with Color 100 community steers via SR Policy
+  let steered =
+    bgp_sr_policy.steer_route(pfx, Ipv4(172, 22, 64, 1), [color_comm], tbl1)
+  case steered {
+    bgp_sr_policy.SteeredSrPolicy(c, ep, ap) -> {
+      c |> should.equal(100)
+      ep |> should.equal(Ipv4(172, 22, 64, 1))
+      ap.preference |> should.equal(200)
+    }
+    _ -> should.fail()
+  }
+
+  // Case B: Route without Color community falls back to direct next-hop
+  let unsteered = bgp_sr_policy.steer_route(pfx, Ipv4(172, 22, 64, 1), [], tbl1)
+  case unsteered {
+    bgp_sr_policy.SteeredStandardNextHop(nh) ->
+      nh |> should.equal(Ipv4(172, 22, 64, 1))
+    _ -> should.fail()
+  }
+
+  // Case C: Route with unmatched Color community falls back to direct next-hop
+  let other_comm = bgp_sr_policy.encode_color_extended_community(999)
+  let fallback =
+    bgp_sr_policy.steer_route(pfx, Ipv4(172, 22, 64, 1), [other_comm], tbl1)
+  case fallback {
+    bgp_sr_policy.SteeredStandardNextHop(nh) ->
+      nh |> should.equal(Ipv4(172, 22, 64, 1))
+    _ -> should.fail()
+  }
+}
+
+// 58. RFC 8277 BGP Labeled Unicast (BGP-LU / SAFI 4)
+pub fn rfc8277_labeled_unicast_test() {
+  // 1. Single Label Prefix Encoding & Decoding
+  let assert Ok(pfx1) = parse_prefix("172.20.44.0/24")
+  let lp1 =
+    bgp_lu.LabeledPrefix(
+      labels: [bgp_lu.MplsLabel(value: 1001, tc: 2, bottom_of_stack: True)],
+      prefix: pfx1,
+    )
+  let bytes1 = bgp_lu.encode_labeled_prefix(lp1)
+  let assert Ok(#(dec1, rem1)) =
+    bgp_lu.decode_labeled_prefix(types.AfiIpv4, bytes1)
+  rem1 |> should.equal(<<>>)
+  dec1.prefix |> should.equal(pfx1)
+  list.length(dec1.labels) |> should.equal(1)
+  let assert [l1] = dec1.labels
+  l1.value |> should.equal(1001)
+  l1.tc |> should.equal(2)
+  l1.bottom_of_stack |> should.equal(True)
+
+  // 2. Multi-Label Stack Encoding & Decoding
+  let assert Ok(pfx2) = parse_prefix("172.22.123.0/24")
+  let lp2 =
+    bgp_lu.LabeledPrefix(
+      labels: [
+        bgp_lu.MplsLabel(value: 2001, tc: 0, bottom_of_stack: False),
+        bgp_lu.MplsLabel(value: 3001, tc: 0, bottom_of_stack: True),
+      ],
+      prefix: pfx2,
+    )
+  let bytes2 = bgp_lu.encode_labeled_prefix(lp2)
+  let assert Ok(#(dec2, _)) =
+    bgp_lu.decode_labeled_prefix(types.AfiIpv4, bytes2)
+  dec2.prefix |> should.equal(pfx2)
+  list.length(dec2.labels) |> should.equal(2)
+  let assert [lbl_outer, lbl_inner] = dec2.labels
+  lbl_outer.value |> should.equal(2001)
+  lbl_outer.bottom_of_stack |> should.equal(False)
+  lbl_inner.value |> should.equal(3001)
+  lbl_inner.bottom_of_stack |> should.equal(True)
+
+  // 3. Multi-Prefix Labeled Stream Decoding
+  let stream_bytes = bgp_lu.encode_labeled_prefixes([lp1, lp2])
+  let assert Ok(stream_decoded) =
+    bgp_lu.decode_labeled_stream(types.AfiIpv4, stream_bytes)
+  list.length(stream_decoded) |> should.equal(2)
+
+  // 4. Labeled RIB Longest Prefix Match (LPM) Lookup
+  let assert Ok(pfx_more_specific) = parse_prefix("172.20.44.128/28")
+  let r_base =
+    bgp_lu.LabeledRoute(
+      prefix: pfx1,
+      labels: [bgp_lu.MplsLabel(1001, 0, True)],
+      next_hop: Ipv4(172, 22, 64, 1),
+      origin_asn: 4_242_421_732,
+    )
+  let r_specific =
+    bgp_lu.LabeledRoute(
+      prefix: pfx_more_specific,
+      labels: [bgp_lu.MplsLabel(9999, 0, True)],
+      next_hop: Ipv4(172, 22, 64, 9),
+      origin_asn: 4_242_421_732,
+    )
+
+  let rib0 = bgp_lu.new_labeled_rib()
+  let rib1 = bgp_lu.insert_labeled_route(rib0, r_base)
+  let rib2 = bgp_lu.insert_labeled_route(rib1, r_specific)
+
+  // Target 172.20.44.130 matches /28 (more specific)
+  let assert Some(hit1) =
+    bgp_lu.lookup_labeled_route(rib2, Ipv4(172, 20, 44, 130))
+  hit1.prefix |> should.equal(pfx_more_specific)
+  let assert [hit_lbl1] = hit1.labels
+  hit_lbl1.value |> should.equal(9999)
+
+  // Target 172.20.44.1 matches /24 (base)
+  let assert Some(hit2) =
+    bgp_lu.lookup_labeled_route(rib2, Ipv4(172, 20, 44, 1))
+  hit2.prefix |> should.equal(pfx1)
+  let assert [hit_lbl2] = hit2.labels
+  hit_lbl2.value |> should.equal(1001)
+
+  // Target outside any route returns None
+  let miss = bgp_lu.lookup_labeled_route(rib2, Ipv4(10, 0, 0, 1))
+  miss |> should.equal(None)
 }

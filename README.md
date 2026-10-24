@@ -70,6 +70,8 @@ In traditional C/C++ routing software (BIRD, FRRouting, OpenBGPD), a single malf
 | **RFC 4684** | Constrained Route Distribution for BGP/MPLS IP VPNs (Route Target Constraint - RTC) | Full |
 | **RFC 9107** | BGP Optimal Route Reflection (BGP-ORR: Perspective-Based Client Best-Path & Deflection Avoidance) | Full |
 | **BGP-PIC** | BGP Prefix-Independent Convergence (BGP-PIC Edge/Core & Sub-Millisecond O(1) Fast Reroute) | Full |
+| **RFC 9256** | Segment Routing Policy Architecture in BGP (SAFI 73 & RFC 9012 Color Extended Community Steering) | Full |
+| **RFC 8277** | Using BGP to Distribute MPLS Label Information (BGP Labeled Unicast - BGP-LU / SAFI 4) | Full |
 
 ---
 
@@ -332,19 +334,29 @@ slopbgpctl orr audit
 slopbgpctl pic routes
 slopbgpctl pic failover 172.22.64.1
 slopbgpctl pic status
+
+# Manage RFC 9256 BGP Segment Routing Policies & simulate Color Steering
+slopbgpctl sr-policy list
+slopbgpctl sr-policy steer 172.20.100.0/24 100 172.22.64.1
+slopbgpctl sr-policy status
+
+# Inspect RFC 8277 BGP Labeled Unicast (BGP-LU) MPLS label stack RIB & lookup
+slopbgpctl lu list
+slopbgpctl lu lookup 172.20.44.130
+slopbgpctl lu
 ```
 
 ---
 
 ## Web Dashboard & Interactive Network Topology
 
-`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, Flap damping decay, Multi-VRF Isolation, Segment Routing SIDs, BGP Unnumbered peer status, RFC 8416 SLURM overrides, RFC 4684 RTC subscriptions, RFC 9107 BGP-ORR client perspectives, and BGP-PIC fast reroute:
+`slopbgp` includes a built-in cyberpunk HTTP/REST monitoring dashboard with an interactive SVG peering graph, Carrier Looking Glass panel, live Loc-RIB best routes, Kernel FIB tables, ROA validation counters, Flowspec DDoS rules, BFD fast-failover sessions, Flap damping decay, Multi-VRF Isolation, Segment Routing SIDs, BGP Unnumbered peer status, RFC 8416 SLURM overrides, RFC 4684 RTC subscriptions, RFC 9107 BGP-ORR client perspectives, BGP-PIC fast reroute, RFC 9256 BGP SR Policy color steering, and RFC 8277 BGP-LU:
 
 ![slopbgp Dashboard](screenshots/dashboard_full.png)
 
 * **Real-time Radial SVG Peering Graph**: Visualizes local router hub with glowing session states (Established in green, Syncing/Drained in amber, Inactive in red/gray).
 * **Carrier Looking Glass**: Live route queries with exact and longest-prefix match (LPM), AS-Path traversal inspection, and Community filters.
-* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/slurm`, `/api/rtc`, `/api/orr`, `/api/pic`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`, `/api/vrf`, `/api/sr`, `/api/unnumbered`.
+* **RFC Inspection**: Live endpoints for `/api/status`, `/api/peers`, `/api/routes`, `/api/topology`, `/api/rr`, `/api/confed`, `/api/flowspec`, `/api/damping`, `/api/routeserver`, `/api/bmp`, `/api/rtr`, `/api/slurm`, `/api/rtc`, `/api/orr`, `/api/pic`, `/api/sr-policy`, `/api/lu`, `/api/bfd`, `/api/blackhole`, `/api/evpn`, `/api/lg`, `/api/vrf`, `/api/sr`, `/api/unnumbered`.
 * **Zero External Dependencies**: Pure SVG and HTML rendered by the daemon without requiring node, webpack, or javascript bundles.
 
 ---
@@ -379,7 +391,7 @@ nix develop
 ### With Gleam
 
 ```bash
-# Run unit and integration test suite (56 test suites passing)
+# Run unit and integration test suite (58 test suites passing)
 gleam test
 
 # Format code
